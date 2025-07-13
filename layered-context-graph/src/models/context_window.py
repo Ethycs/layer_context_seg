@@ -78,15 +78,31 @@ class ContextWindow:
         return windows
     
     def _fallback_word_chunking(self, text):
-        """Fallback to word-based chunking for texts without clear paragraph structure"""
+        """
+        Fallback to word-based chunking for texts without clear paragraph structure
+        Using percolation theory optimal overlap (15-30%) for knowledge connectivity
+        """
         # Apply fluff removal first
         cleaned_text = self._remove_fluff(text)
         words = cleaned_text.split()
         windows = []
         
-        # Create overlapping windows to preserve context
-        overlap_size = self.size // 8  # 12.5% overlap
+        # Calculate optimal overlap based on percolation theory (15-30%)
+        # Closer to 15% for long texts, closer to 30% for shorter texts
+        # This creates a "phase transition" where information can percolate across the graph
+        if len(words) > self.size * 3:
+            # For very long texts, use lower overlap (15%)
+            overlap_ratio = 0.15
+        elif len(words) > self.size:
+            # For medium texts, use middle overlap (20%)
+            overlap_ratio = 0.20
+        else:
+            # For shorter texts, use higher overlap (25%)
+            overlap_ratio = 0.25
+            
+        overlap_size = int(self.size * overlap_ratio)
         
+        # Create overlapping windows to enable percolation
         for i in range(0, len(words), self.size - overlap_size):
             window_words = words[i:i + self.size]
             if window_words:
