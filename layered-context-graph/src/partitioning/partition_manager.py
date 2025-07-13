@@ -149,99 +149,89 @@ class PartitionManager:
             # Round 4+: Simple character-based splitting as fallback
             return self._split_by_character_count(segment)
     
-    def _split_by_semantic_boundaries(self, segment):
-        """Split by paragraph and sentence boundaries"""
-        # First try paragraph breaks
-        paragraphs = segment.split('\n\n')
-        if len(paragraphs) > 1:
-            return [p.strip() for p in paragraphs if p.strip()]
+    def _apply_disassembly_rules(self, text):
+        """
+        Rule K1: Initial Disassembly Rules
+        Apply semantic, attention, percolation, and instruction marker boundaries
+        """
+        segments = [text]
         
-        # Then try sentence breaks
-        sentences = segment.split('. ')
-        if len(sentences) > 1:
-            # Group sentences to approach target length
-            groups = []
-            current_group = ""
+        # Apply each disassembly rule if enabled
+        if self.disassembly_rules.get('semantic_boundaries', True):
+            segments = self._split_by_semantic_boundaries(segments)
             
+        if self.disassembly_rules.get('attention_clusters', True):
+            segments = self._split_by_attention_clusters(segments)
+            
+        if self.disassembly_rules.get('percolation_thresholds', True):
+            segments = self._split_by_percolation_thresholds(segments)
+            
+        if self.disassembly_rules.get('instruction_markers', True):
+            segments = self._split_by_instruction_markers(segments)
+            
+        return segments
+    
+    def _split_by_semantic_boundaries(self, segments):
+        """Split segments at semantic boundaries (paragraphs, topic shifts)"""
+        new_segments = []
+        for segment in segments:
+            # Split by paragraphs first
+            paragraphs = segment.split('\n\n')
+            for paragraph in paragraphs:
+                if paragraph.strip():
+                    new_segments.append(paragraph.strip())
+        return new_segments
+    
+    def _split_by_attention_clusters(self, segments):
+        """Split segments using attention pattern analysis"""
+        # For now, use sentence boundaries as attention clusters
+        new_segments = []
+        for segment in segments:
+            sentences = segment.split('. ')
             for sentence in sentences:
-                if len(current_group) + len(sentence) < self.target_segment_length:
-                    current_group = (current_group + ". " + sentence).strip()
-                else:
-                    if current_group:
-                        groups.append(current_group)
-                    current_group = sentence
-            
-            if current_group:
-                groups.append(current_group)
+                if sentence.strip():
+                    if not sentence.endswith('.'):
+                        sentence += '.'
+                    new_segments.append(sentence.strip())
+        return new_segments
+    
+    def _split_by_percolation_thresholds(self, segments):
+        """Apply percolation theory boundaries"""
+        # Use overlap ratio to determine optimal split points
+        new_segments = []
+        for segment in segments:
+            words = segment.split()
+            if len(words) > self.target_segment_length // 10:  # If segment is large
+                # Split at natural percolation boundaries
+                mid_point = len(words) // 2
+                overlap_size = int(len(words) * self.overlap_ratio)
                 
-            return groups
-        
-        return [segment]  # Can't split further
-    
-    def _split_by_syntactic_boundaries(self, segment):
-        """Split by syntactic boundaries (commas, conjunctions, etc.)"""
-        # Split by major punctuation
-        split_chars = ['; ', ', and ', ', or ', ', but ', '. However, ', '. Therefore, ']
-        
-        for split_char in split_chars:
-            if split_char in segment:
-                parts = segment.split(split_char)
-                if len(parts) > 1:
-                    return [part.strip() for part in parts if part.strip()]
-        
-        return [segment]  # Can't split further
-    
-    def _split_by_instruction_markers(self, segment):
-        """Split by instruction markers"""
-        markers = ['<MATH>', '<DIALOGUE>', '<MEMORY>', '<TRACK>', 
-                  '<QWQ_REASONING>', '<QWQ_CONCLUSION>', '<QWQ_EXAMPLE>']
-        
-        for marker in markers:
-            if marker in segment:
-                parts = segment.split(marker)
-                result = []
-                for i, part in enumerate(parts):
-                    if i > 0:  # Add marker back to parts after the first
-                        part = marker + part
-                    if part.strip():
-                        result.append(part.strip())
-                if len(result) > 1:
-                    return result
-        
-        return [segment]  # Can't split further
-    
-    def _split_by_character_count(self, segment):
-        """Fallback: split by character count while preserving word boundaries"""
-        if len(segment) <= self.target_segment_length:
-            return [segment]
-        
-        # Split at word boundaries near target length
-        words = segment.split()
-        parts = []
-        current_part = ""
-        
-        for word in words:
-            if len(current_part) + len(word) + 1 <= self.target_segment_length:
-                current_part = (current_part + " " + word).strip()
+                part1 = ' '.join(words[:mid_point + overlap_size])
+                part2 = ' '.join(words[mid_point:])
+                
+                new_segments.extend([part1, part2])
             else:
-                if current_part:
-                    parts.append(current_part)
-                current_part = word
-        
-        if current_part:
-            parts.append(current_part)
-        
-        return parts
+                new_segments.append(segment)
+        return new_segments
     
-    def _get_round_criteria(self, round_num):
-        """Get description of criteria used in this round"""
-        criteria_map = {
-            0: "semantic_boundaries",
-            1: "syntactic_boundaries", 
-            2: "instruction_markers",
-            3: "character_count"
-        }
-        return criteria_map.get(round_num, "character_count")
+    def _split_by_instruction_markers(self, segments):
+        """Split at special instruction markers"""
+        new_segments = []
+        for segment in segments:
+            # Look for instruction markers like <SEGMENT>, <RELATE>, etc.
+            import re
+            markers = re.findall(r'<[A-Z_]+>.*?</[A-Z_]+>', segment)
+            if markers:
+                # Split around markers
+                parts = re.split(r'<[A-Z_]+>.*?</[A-Z_]+>', segment)
+                for i, part in enumerate(parts):
+                    if part.strip():
+                        new_segments.append(part.strip())
+                    if i < len(markers):
+                        new_segments.append(markers[i])
+            else:
+                new_segments.append(segment)
+        return new_segments
     
     def get_segmentation_summary(self):
         """Get summary of the segmentation process"""
