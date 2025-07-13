@@ -220,6 +220,11 @@ class OllamaModelExtractor:
         
         return config
     
+    @property
+    def config(self):
+        """Return the model configuration as a dictionary for compatibility"""
+        return self.get_model_config()
+    
     def convert_to_pytorch_state_dict(self):
         """Convert full GGUF model to PyTorch state dict with proper QwQ 32B handling"""
         
