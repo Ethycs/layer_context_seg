@@ -161,6 +161,56 @@ def test_complete_system():
                 if len(chunks) >= 2:
                     sim = attention_extractor._text_similarity(chunks[0], chunks[1])
                     print(f"   Sample text similarity between chunk 0 and 1: {sim:.3f}")
+            
+            # Save graph to results directory
+            try:
+                import json
+                from datetime import datetime
+                
+                # Create results directory if it doesn't exist
+                results_dir = "/workspace/results"
+                os.makedirs(results_dir, exist_ok=True)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                graph_filename = f"{results_dir}/test_system_graph_{timestamp}.json"
+                
+                # Convert tensors to lists for JSON serialization
+                serializable_graph = {
+                    'nodes': [],
+                    'edges': graph_data['edges'],
+                    'metadata': graph_data['metadata'],
+                    'timestamp': timestamp,
+                    'test_name': 'complete_system_test'
+                }
+                
+                # Process nodes to make them JSON-serializable
+                for node in graph_data['nodes']:
+                    serializable_node = {
+                        'id': node['id'],
+                        'text': node['text'],
+                        'word_count': node['word_count'],
+                        'char_count': node['char_count']
+                    }
+                    
+                    # Convert attention features to serializable format
+                    if 'attention_features' in node and 'fingerprint' in node['attention_features']:
+                        fingerprint = node['attention_features']['fingerprint']
+                        if hasattr(fingerprint, 'tolist'):
+                            serializable_node['attention_fingerprint'] = fingerprint.tolist()
+                        else:
+                            serializable_node['attention_fingerprint'] = list(fingerprint)
+                    
+                    serializable_graph['nodes'].append(serializable_node)
+                
+                # Save to file
+                with open(graph_filename, 'w', encoding='utf-8') as f:
+                    json.dump(serializable_graph, f, indent=2, ensure_ascii=False)
+                
+                print(f"   ✅ Graph saved to: {graph_filename}")
+                
+            except Exception as save_error:
+                print(f"   ⚠️ Failed to save graph: {save_error}")
+                
         else:
             print("   Graph creation skipped (attention data insufficient)")
             
@@ -185,6 +235,124 @@ def test_complete_system():
         else:
             print(f"     {key}: {type(value).__name__}")
     
+    # Step 9: Demonstrate reconstruction/reassembly
+    print("\n9. Testing reconstruction and reassembly...")
+    try:
+        from graph.graph_reassembler import GraphReassembler
+        from partitioning.partition_manager import PartitionManager
+        
+        # Create partition manager for structured disassembly
+        partition_manager = PartitionManager(target_segment_length=300, max_rounds=3)
+        
+        # Create partitions from our text
+        partitions = partition_manager.create_partitions(test_transcript)
+        print(f"   Created {len(partitions)} partitions from original text")
+        
+        # Show segmentation summary
+        summary = partition_manager.get_segmentation_summary()
+        print(f"   Segmentation rounds: {summary['total_rounds']}")
+        print(f"   Target length: {summary['target_length']} chars")
+        print(f"   Final avg length: {summary['final_avg_length']:.1f} chars")
+        
+        # Create reassembler
+        reassembler = GraphReassembler()
+        
+        # Prepare graph data for reassembly
+        if 'graph_data' in locals() and graph_data:
+            # Use the created graph
+            reassembly_result = reassembler.reassemble_from_graph(graph_data, chunks)
+        else:
+            # Create a simple graph from partitions for demo
+            demo_nodes = []
+            demo_edges = []
+            
+            for i, partition in enumerate(partitions):
+                demo_nodes.append({
+                    'id': i,
+                    'text': partition,
+                    'word_count': len(partition.split()),
+                    'char_count': len(partition)
+                })
+                
+                # Create edges between consecutive partitions
+                if i > 0:
+                    demo_edges.append({
+                        'source': i-1,
+                        'target': i,
+                        'weight': 0.8,
+                        'relationship': 'sequential'
+                    })
+            
+            demo_graph = {
+                'nodes': demo_nodes,
+                'edges': demo_edges,
+                'metadata': {'source': 'partition_demo'}
+            }
+            
+            reassembly_result = reassembler.reassemble_from_graph(demo_graph, partitions)
+        
+        print(f"   Reassembly result type: {type(reassembly_result)}")
+        
+        if isinstance(reassembly_result, dict):
+            if 'condensed_text' in reassembly_result:
+                condensed = reassembly_result['condensed_text']
+                print(f"   Condensed text length: {len(condensed)} chars")
+                print(f"   Original text length: {len(test_transcript)} chars")
+                compression_ratio = len(condensed) / len(test_transcript)
+                print(f"   Compression ratio: {compression_ratio:.2f}")
+                
+                # Show a sample of the condensed text
+                print(f"   Sample condensed text: {condensed[:200]}...")
+                
+            if 'layered_structure' in reassembly_result:
+                layers = reassembly_result['layered_structure']
+                print(f"   Created {len(layers)} organizational layers")
+                
+        # Save reassembly results
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Save condensed version
+            if isinstance(reassembly_result, dict) and 'condensed_text' in reassembly_result:
+                condensed_filename = f"{results_dir}/test_system_condensed_{timestamp}.md"
+                with open(condensed_filename, 'w', encoding='utf-8') as f:
+                    f.write("# Reconstructed Content from Layered Context Graph\n\n")
+                    f.write(f"Generated: {timestamp}\n\n")
+                    f.write("## Condensed Summary\n\n")
+                    f.write(reassembly_result['condensed_text'])
+                    
+                    if 'layered_structure' in reassembly_result:
+                        f.write("\n\n## Layered Structure\n\n")
+                        for i, layer in enumerate(reassembly_result['layered_structure']):
+                            f.write(f"### Layer {i+1}\n\n")
+                            f.write(f"{layer}\n\n")
+                
+                print(f"   ✅ Condensed content saved to: {condensed_filename}")
+            
+            # Save partition analysis
+            partition_filename = f"{results_dir}/test_system_partitions_{timestamp}.json"
+            partition_data = {
+                'partitions': partitions,
+                'segmentation_summary': summary,
+                'rules_applied': rules,
+                'timestamp': timestamp
+            }
+            
+            import json
+            with open(partition_filename, 'w', encoding='utf-8') as f:
+                json.dump(partition_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"   ✅ Partition analysis saved to: {partition_filename}")
+            
+        except Exception as save_error:
+            print(f"   ⚠️ Failed to save reconstruction results: {save_error}")
+            
+    except Exception as e:
+        print(f"   ⚠ Reconstruction failed: {e}")
+        import traceback
+        traceback.print_exc()
+
     print("\n=== System Test Complete ===")
     print(f"✓ Context windows with percolation overlap: {len(windows)} windows")
     print(f"✓ Natural language rule specification: Working")
