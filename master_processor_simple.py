@@ -65,14 +65,17 @@ class SimpleMasterProcessor:
         model_name = self.model_config.get('default_model', 'distilbert-base-uncased')
         
         try:
-            self.attention_extractor = EnhancedAttentionExtractor(
-                model_name, model_type=self.model_type
-            )
+            # EnhancedAttentionExtractor only takes model_path parameter
+            if self.model_type == 'ollama':
+                # For ollama, pass the model path
+                self.attention_extractor = EnhancedAttentionExtractor(model_name)
+            else:
+                # For transformer models, don't pass any parameter (will use default)
+                self.attention_extractor = EnhancedAttentionExtractor()
         except Exception as e:
-            logger.warning(f"Failed to load preferred model, falling back to distilbert: {e}")
-            self.attention_extractor = EnhancedAttentionExtractor(
-                "distilbert-base-uncased", model_type="transformer"
-            )
+            logger.warning(f"Failed to load model: {e}")
+            # Try with default
+            self.attention_extractor = EnhancedAttentionExtractor()
         
         self.partition_manager = PartitionManager(
             overlap_ratio=self.processing_settings.get('overlap_ratio', 0.1),
@@ -90,7 +93,7 @@ class SimpleMasterProcessor:
         
         # Step 1: Create semantic windows
         logger.info("Creating semantic windows...")
-        semantic_windows = self.context_window.create_semantic_windows(text)
+        semantic_windows = self.context_window.create_window(text)
         logger.info(f"Created {len(semantic_windows)} semantic windows")
         
         # Step 2: Seed with instructions if rules provided
@@ -106,13 +109,14 @@ class SimpleMasterProcessor:
         
         # Step 4: Create partitions
         logger.info("Creating partitions...")
-        partitions = self.partition_manager.create_partitions(
-            semantic_windows, attention_patterns
-        )
+        partitions = self.partition_manager.create_partitions(semantic_windows)
         
         # Step 5: Reassemble
         logger.info("Reassembling graph...")
-        reassembled = self.graph_reassembler.reassemble(partitions, text)
+        # GraphReassembler expects nodes and edges, so we need to convert partitions
+        nodes = [{'id': f'partition_{i}', 'content': p} for i, p in enumerate(partitions)]
+        edges = []  # No edges for simple processing
+        reassembled = self.graph_reassembler.reassemble_graph(nodes, edges, text)
         
         processing_time = (datetime.now() - start_time).total_seconds()
         

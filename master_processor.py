@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 # Add src directory to path for robust execution
+import sys
+from pathlib import Path
 project_root = Path(__file__).parent.resolve()
 src_path = project_root / "layered-context-graph" / "src"
 if str(src_path) not in sys.path:
@@ -30,18 +32,13 @@ if str(src_path) not in sys.path:
 # Unified config import
 from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS
 
-try:
-    # Core imports
-    from models.context_window import ContextWindow
-    from models.attention_extractor import EnhancedAttentionExtractor
-    from models.instruction_seeder import InstructionSeeder
-    from partitioning.partition_manager import PartitionManager
-    from graph.graph_reassembler import GraphReassembler
-    from processor.language_guided_processor import LanguageGuidedProcessor
-except ImportError as e:
-    print(f"❌ Import error: {e}")
-    print("Make sure you're running from the correct directory with all dependencies installed")
-    sys.exit(1)
+# Core imports
+from models.context_window import ContextWindow
+from models.attention_extractor import EnhancedAttentionExtractor
+from models.instruction_seeder import InstructionSeeder
+from partitioning.partition_manager import PartitionManager
+from graph.graph_reassembler import GraphReassembler
+from processor.language_guided_processor import LanguageGuidedProcessor
 
 # Configure logging
 logging.basicConfig(
@@ -86,16 +83,7 @@ class MasterProcessor:
         self.seeder = InstructionSeeder()
         
         model_name = self.model_config.get('default_model', 'distilbert-base-uncased')
-        
-        try:
-            self.attention_extractor = EnhancedAttentionExtractor(
-                model_name, model_type=self.model_type
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load preferred model, falling back to distilbert: {e}")
-            self.attention_extractor = EnhancedAttentionExtractor(
-                "distilbert-base-uncased", model_type="transformer"
-            )
+        self.attention_extractor = EnhancedAttentionExtractor(model_name=model_name)
         
         self.partition_manager = PartitionManager(
             overlap_ratio=self.processing_settings.get('overlap_ratio', 0.1),
