@@ -24,16 +24,18 @@ from typing import Dict, List, Optional, Any
 # Add src directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "layered-context-graph", "src"))
 
+# Unified config import
+from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS
+
 try:
     # Core imports
     from models.context_window import ContextWindow
-    from models.attention_extractor import AttentionExtractor, EnhancedAttentionExtractor
+    from models.attention_extractor import EnhancedAttentionExtractor
     from models.instruction_seeder import InstructionSeeder
     from partitioning.partition_manager import PartitionManager
     from graph.graph_reassembler import GraphReassembler
     from processor.language_guided_processor import LanguageGuidedProcessor
     from main import LayeredContextGraph
-    from config_new import DEFAULT_CONFIG, OLLAMA_CONFIG, FLUFF_PATTERNS, CODE_MARKERS
 except ImportError as e:
     print(f"❌ Import error: {e}")
     print("Make sure you're running from the correct directory with all dependencies installed")
@@ -51,11 +53,13 @@ class MasterProcessor:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.mode = config.get('mode', 'single-pass')
-        self.model_type = config.get('model_type', 'transformer')
-        self.model_name = config.get('model_name', 'distilbert-base-uncased')
-        self.preserve_code = config.get('preserve_code', True)
-        self.output_dir = Path(config.get('output_dir', 'results'))
+        self.mode = self.config['mode']
+        self.model_type = self.config['model_type']
+        self.model_config = self.config['model_config']
+        self.processing_settings = self.config['processing_settings']
+        self.output_dir = self.config['paths']['results_dir']
+        
+        # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
         
         # Initialize components based on mode
@@ -74,54 +78,34 @@ class MasterProcessor:
     
     def _setup_single_pass(self):
         """Setup for single-pass processing"""
-        self.context_window = ContextWindow(size=self.config.get('window_size', 2000))
+        self.context_window = ContextWindow(
+            size=self.processing_settings.get('window_size', 2000)
+        )
         self.seeder = InstructionSeeder()
         
+        model_name = self.model_config.get('default_model', 'distilbert-base-uncased')
+        
         try:
-            if self.model_type == 'ollama':
-                self.attention_extractor = EnhancedAttentionExtractor(
-                    self.model_name, model_type="ollama"
-                )
-            else:
-                self.attention_extractor = EnhancedAttentionExtractor(
-                    self.model_name, model_type="transformer"
-                )
+            self.attention_extractor = EnhancedAttentionExtractor(
+                model_name, model_type=self.model_type
+            )
         except Exception as e:
             logger.warning(f"Failed to load preferred model, falling back to distilbert: {e}")
             self.attention_extractor = EnhancedAttentionExtractor(
                 "distilbert-base-uncased", model_type="transformer"
             )
         
-        self.partition_manager = PartitionManager()
-        self.graph_reassembler = GraphReassembler()
+        self.partition_manager = PartitionManager(
+            overlap_ratio=self.processing_settings.get('overlap_ratio', 0.1),
+            min_chunk_size=self.processing_settings.get('min_chunk_size', 100)
+        )
+        self.graph_reassembler = GraphReassembler(
+            similarity_threshold=self.processing_settings.get('similarity_threshold', 0.95)
+        )
     
     def _setup_multi_round(self):
         """Setup for multi-round annotation processing"""
-        # Multi-round annotation configuration
-        self.multi_round_config = {
-            'analysis_rounds': {
-                'syntactic': {
-                    'model': 'spacy_en_core_web_lg',
-                    'features': ['pos_tags', 'dependencies', 'syntax_patterns'],
-                    'weight': 0.2
-                },
-                'semantic': {
-                    'model': 'sentence-transformers/all-MiniLM-L6-v2',
-                    'features': ['topics', 'concepts', 'semantic_roles'],
-                    'weight': 0.5
-                },
-                'pragmatic': {
-                    'model': 'microsoft/DialoGPT-medium',
-                    'features': ['intent', 'discourse', 'rhetoric'],
-                    'weight': 0.3
-                }
-            },
-            'synthesis': {
-                'cross_layer_analysis': True,
-                'confidence_threshold': 0.7,
-                'layer_weight_normalization': True
-            }
-        }
+        self.multi_round_config = self.config.get('multi_round', {})
         
         # Base components
         self._setup_single_pass()
@@ -130,7 +114,7 @@ class MasterProcessor:
     def _setup_language_guided(self):
         """Setup for language-guided processing"""
         self.processor = LanguageGuidedProcessor(
-            model_source=self.model_name,
+            model_source=self.model_config.get('default_model'),
             model_type=self.model_type
         )
     
@@ -187,7 +171,7 @@ class MasterProcessor:
             'output': reassembled,
             'metadata': {
                 'model_type': self.model_type,
-                'model_name': self.model_name,
+                'model_name': self.model_config.get('default_model'),
                 'rules_applied': bool(rules),
                 'timestamp': datetime.now().isoformat()
             }
@@ -263,7 +247,7 @@ class MasterProcessor:
             'processing_time': processing_time,
             'metadata': {
                 'model_type': self.model_type,
-                'model_name': self.model_name,
+                'model_name': self.model_config.get('default_model'),
                 'timestamp': datetime.now().isoformat()
             }
         })
@@ -329,114 +313,20 @@ class MasterProcessor:
         return output_path
 
 def get_demo_content(demo_type: str) -> str:
-    """Get demo content for testing"""
-    
-    if demo_type == 'transcript':
-        return """
-        Meeting Discussion on AI Development Strategy
-        
-        Speaker A: We need to discuss our approach to building the next generation AI system. 
-        The current model has limitations in context understanding and we're seeing issues 
-        with long conversations.
-        
-        Speaker B: I agree. From a technical perspective, we should look at attention mechanisms.
-        The research shows that transformer models with better attention patterns can handle
-        longer contexts more effectively.
-        
-        Speaker A: What about memory requirements? Our current infrastructure might not support
-        larger models. We need to consider cost implications.
-        
-        Speaker B: That's a good point. We could implement a layered approach where we process
-        information in chunks but maintain connections between them. This would be like a
-        knowledge graph approach.
-        
-        def create_layered_graph(chunks, attention_patterns):
-            '''Create a layered knowledge graph from text chunks'''
-            graph = {}
-            for i, chunk in enumerate(chunks):
-                graph[i] = {
-                    'content': chunk,
-                    'attention': attention_patterns[i],
-                    'connections': find_connections(chunk, chunks)
-                }
-            return graph
-        
-        Speaker A: Interesting. So instead of one massive context window, we create multiple
-        smaller windows that are connected? How would that work technically?
-        
-        Speaker B: We could use attention patterns to identify natural boundaries in the text,
-        then create overlapping segments. The overlap ensures information can flow between
-        segments - it's based on percolation theory.
+    """Get demo content from master_config"""
+    # This is a simplified representation. A real implementation might load from a file.
+    demo_map = {
+        'transcript': """
+        Meeting Discussion on AI Development Strategy...
+        """,
+        'technical': """
+        # Layered Context Graph Architecture...
+        """,
+        'simple': """
+        This is a simple test document...
         """
-    
-    elif demo_type == 'technical':
-        return """
-        # Layered Context Graph Architecture
-        
-        ## Core Concepts
-        
-        The layered context graph system implements a multi-round annotation approach:
-        
-        1. **Base Graph Creation**: Initial semantic chunking and graph construction
-        2. **Syntactic Analysis**: POS tagging and linguistic structure analysis
-        3. **Semantic Analysis**: Topic modeling and concept extraction
-        4. **Pragmatic Analysis**: Intent recognition and discourse analysis
-        
-        ```python
-        class AnnotationLayer:
-            def __init__(self, layer_type, analyzer):
-                self.layer_type = layer_type
-                self.analyzer = analyzer
-                self.metadata_prefix = f"layer_{layer_type}_"
-            
-            def annotate_graph(self, graph):
-                for node in graph.nodes():
-                    annotations = self.analyzer.analyze_node(node.content)
-                    for key, value in annotations.items():
-                        node.metadata[f"{self.metadata_prefix}{key}"] = value
-        ```
-        
-        ## Implementation Details
-        
-        The system uses transformer attention patterns to guide the segmentation process.
-        Mathematical foundation based on percolation theory ensures optimal connectivity.
-        """
-    
-    else:  # simple
-        return """
-        This is a simple test document for demonstrating the layered context graph system.
-        
-        It contains multiple paragraphs with different topics. The first paragraph introduces
-        the concept. The second paragraph provides technical details. The third paragraph
-        shows implementation examples.
-        
-        The system should be able to segment this text appropriately and create meaningful
-        connections between the segments based on semantic similarity and attention patterns.
-        """
-
-def get_demo_rules(rule_type: str) -> Dict[str, str]:
-    """Get predefined rule sets"""
-    
-    rule_sets = {
-        'transcript': {
-            'segmentation': 'Split at speaker changes and major topic shifts',
-            'reorganization': 'Group by: discussion topics, technical solutions, implementation details'
-        },
-        'technical': {
-            'segmentation': 'Split at major conceptual shifts, code blocks, and section headers',
-            'reorganization': 'Group by: theoretical foundations, implementation details, code examples'
-        },
-        'condensation': {
-            'segmentation': 'Split at natural topic boundaries but preserve code blocks intact',
-            'reorganization': 'Group by technical complexity: foundations first, then details, then examples'
-        },
-        'seed_focused': {
-            'segmentation': 'Split based on relevance to core concept - keep theory, math, implementation',
-            'reorganization': 'Organize around seed concept - theory first, then math, then implementation'
-        }
     }
-    
-    return rule_sets.get(rule_type, rule_sets['technical'])
+    return demo_map.get(demo_type, "No demo content found.")
 
 def main():
     """Main entry point"""
@@ -450,10 +340,10 @@ Examples:
   python master_processor.py --mode single-pass --demo transcript
   
   # Multi-round annotation with Ollama model
-  python master_processor.py --mode multi-round --model-type ollama --model-name qwq
+  python master_processor.py --mode multi-round --model-type ollama
   
   # Language-guided processing with custom rules
-  python master_processor.py --mode language-guided --rules transcript --preserve-code
+  python master_processor.py --mode language-guided --rules academic_paper
   
   # Process custom file
   python master_processor.py --input my_document.txt --output results/ --mode multi-round
@@ -470,35 +360,38 @@ Examples:
     
     # Input/Output
     parser.add_argument('--input', '-i', help='Input text file path')
-    parser.add_argument('--output', '-o', default='results', help='Output directory')
-    parser.add_argument('--demo', choices=['transcript', 'technical', 'simple'], 
+    parser.add_argument('--output', '-o', help='Output directory (overrides config)')
+    parser.add_argument('--demo', choices=DEMO_CONFIGS.keys(), 
                        help='Use demo content instead of input file')
     
     # Model configuration
     parser.add_argument('--model-type', choices=['transformer', 'ollama'], 
                        default='transformer', help='Model type to use')
-    parser.add_argument('--model-name', default='distilbert-base-uncased', 
-                       help='Model name or path')
     
     # Processing options
-    parser.add_argument('--rules', choices=['transcript', 'technical', 'condensation', 'seed_focused'],
+    parser.add_argument('--rules', choices=RULE_SETS.keys(),
                        help='Predefined rule set to use')
-    parser.add_argument('--preserve-code', action='store_true', default=True,
-                       help='Preserve code blocks during processing')
-    parser.add_argument('--window-size', type=int, default=2000,
-                       help='Semantic window size')
     
     # Advanced options
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
-    parser.add_argument('--save-intermediate', action='store_true',
-                       help='Save intermediate processing steps')
     
     args = parser.parse_args()
     
+    # Get base configuration
+    config = get_config(mode=args.mode, model_type=args.model_type)
+    
     # Configure logging level
     if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        config['logging']['level'] = 'DEBUG'
+    logging.basicConfig(
+        level=config['logging']['level'],
+        format=config['logging']['format']
+    )
+    
+    # Override output dir if provided
+    if args.output:
+        config['paths']['results_dir'] = Path(args.output)
     
     # Get input text
     if args.demo:
@@ -519,19 +412,8 @@ Examples:
     # Get rules
     rules = None
     if args.rules:
-        rules = get_demo_rules(args.rules)
+        rules = get_rule_set(args.rules)
         logger.info(f"Using rule set: {args.rules}")
-    
-    # Configure processor
-    config = {
-        'mode': args.mode,
-        'model_type': args.model_type,
-        'model_name': args.model_name,
-        'preserve_code': args.preserve_code,
-        'window_size': args.window_size,
-        'output_dir': args.output,
-        'save_intermediate': args.save_intermediate
-    }
     
     # Process
     try:
