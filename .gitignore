@@ -3,3 +3,5 @@ recup_*/
 *.pyc
 .env
 *.egg-info
+*.json
+*.txt

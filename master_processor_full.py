@@ -278,8 +278,7 @@ class FullMasterProcessor:
         reassembled = self.graph_reassembler.reassemble_graph(
             nodes,
             edges,
-            text,
-            organization_rule=rules.get('reorganization') if rules else None
+            text
         )
         
         processing_time = (datetime.now() - start_time).total_seconds()
@@ -352,8 +351,7 @@ class FullMasterProcessor:
         final_output = self.graph_reassembler.reassemble_graph(
             enriched_nodes,
             enriched_edges,
-            text,
-            synthesis_data=synthesis
+            text
         )
         
         processing_time = (datetime.now() - start_time).total_seconds()
