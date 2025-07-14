@@ -31,6 +31,7 @@ from models.percolation_context_window import PercolationContextWindow
 from partitioning.partition_manager import PartitionManager
 from graph.graph_reassembler import GraphReassembler
 from graph.attention_graph_builder import AttentionGraphBuilder
+from graph.hierarchical_graph_builder import HierarchicalGraphBuilder
 
 # Configure logging
 logging.basicConfig(
@@ -93,6 +94,7 @@ class FullMasterProcessor:
         # Graph builders
         self.attention_graph_builder = AttentionGraphBuilder()
         self.graph_reassembler = GraphReassembler()
+        self.hierarchical_builder = HierarchicalGraphBuilder()
         
         # Multi-round annotation layers
         if self.mode == 'multi-round':
@@ -204,9 +206,16 @@ class FullMasterProcessor:
                         'type': 'attention'
                     })
         
-        # Step 5: Reassemble using reconstruction rules
+        # Step 5: Build hierarchical structure
+        logger.info("Building hierarchical graph structure...")
+        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(nodes, edges)
+        
+        # Step 6: Generate analysis report (existing functionality)
         logger.info("Applying reassembly rules...")
-        reassembled = self.graph_reassembler.reassemble_graph(nodes, edges, text)
+        reassembled = self.graph_reassembler.reassemble_graph(hierarchical_nodes, tree_edges, text)
+        
+        # Step 7: Add synthesis capabilities (actual Tape2 generation)
+        logger.info("Synthesis capabilities available - use synthesize_content() method")
         
         processing_time = (datetime.now() - start_time).total_seconds()
         
@@ -611,6 +620,48 @@ class FullMasterProcessor:
             logger.info(f"Reassembled text saved to {text_path}")
         
         return output_path
+    
+    def synthesize_content(self, graph_data: Dict, strategy: str = 'executive_summary') -> Dict[str, Any]:
+        """
+        Synthesize new content from the knowledge graph (Graph → Tape₂)
+        
+        This is the ACTUAL synthesis that creates new documents, not analysis reports.
+        
+        Args:
+            graph_data: The output from process_text() containing nodes, edges, etc.
+            strategy: One of 'executive_summary', 'tutorial', 'reference', 'readme'
+            
+        Returns:
+            Dictionary with synthesized content and metadata
+        """
+        # Import here to avoid circular imports
+        from synthesis.tape_synthesizer import TapeSynthesizer
+        
+        synthesizer = TapeSynthesizer()
+        
+        # Prepare graph data
+        synthesis_input = {
+            'nodes': graph_data.get('output', {}).get('nodes', []),
+            'edges': graph_data.get('output', {}).get('edges', []),
+            'original_text': graph_data.get('original_text', '')
+        }
+        
+        # Generate synthesized content
+        result = synthesizer.synthesize(synthesis_input, strategy)
+        
+        # Save synthesized content
+        if self.output_dir:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"synthesized_{strategy}_{timestamp}.md"
+            output_path = self.output_dir / filename
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(result['tape2'])
+            
+            logger.info(f"Synthesized content saved to {output_path}")
+            result['output_path'] = str(output_path)
+        
+        return result
 
 
 def get_demo_content(demo_type: str) -> str:
@@ -765,6 +816,17 @@ Examples:
         
         print(f"Processing time: {results['processing_time']:.2f} seconds")
         print(f"Results saved to: {output_path}")
+        print("="*60)
+        
+        # Demonstrate synthesis capabilities
+        print("\n" + "="*60)
+        print("SYNTHESIS OPTIONS AVAILABLE")
+        print("="*60)
+        print("You can now synthesize new content using:")
+        print("  synthesized = processor.synthesize_content(results, 'executive_summary')")
+        print("  synthesized = processor.synthesize_content(results, 'tutorial')")
+        print("  synthesized = processor.synthesize_content(results, 'reference')")
+        print("  synthesized = processor.synthesize_content(results, 'readme')")
         print("="*60)
         
     except Exception as e:
