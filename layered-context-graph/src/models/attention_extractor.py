@@ -1,5 +1,5 @@
 """
-Enhanced Attention Extractor that supports both Transformer and Ollama GGUF models
+QwQ-32B Attention Extractor - Primary model for layered context segmentation
 """
 
 import torch
@@ -8,242 +8,173 @@ from typing import Dict, List, Optional, Union, Tuple
 from pathlib import Path
 import logging
 
-try:
-    # Try relative imports first (when used as a module)
-    from .ollama_extractor import OllamaModelExtractor
-except ImportError:
-    # Fall back to absolute imports (when run directly)
-    from ollama_extractor import OllamaModelExtractor
+from .ollama_extractor import OllamaModelExtractor
 
 logger = logging.getLogger(__name__)
 
 
 class EnhancedAttentionExtractor:
     """
-    Unified attention extractor supporting multiple model types:
-    - Hugging Face Transformer models (runtime attention)
-    - Ollama GGUF models (static weight analysis)
+    QwQ-32B attention extractor for layered context segmentation.
+    This is the primary and only model used for tape splitting.
     """
     
-    def __init__(self, model_source: Union[str, object], model_type: str = "auto"):
+    def __init__(self, model_path: str = None):
         """
-        Initialize the attention extractor
+        Initialize the QwQ attention extractor
         
         Args:
-            model_source: Either a model name (str) or model object
-            model_type: "transformer", "ollama", or "auto" (auto-detect)
+            model_path: Optional custom path to QwQ GGUF model file
         """
-        self.model_source = model_source
-        self.model_type = model_type
-        self.model = None
+        self.model_path = model_path
         self.ollama_extractor = None
         self.ollama_config = None
         self.attention_cache = {}
         
-        self._initialize_model()
+        self._initialize_qwq_model()
         
-    def _initialize_model(self):
-        """Initialize the appropriate model based on type"""
+    def _initialize_qwq_model(self):
+        """Initialize QwQ-32B GGUF model for attention extraction"""
         
-        if self.model_type == "auto":
-            self._detect_model_type()
-            
-        if self.model_type == "ollama":
-            self._initialize_ollama_model()
-        elif self.model_type == "transformer":
-            self._initialize_transformer_model()
-        else:
-            raise ValueError(f"Unsupported model type: {self.model_type}")
-            
-    def _detect_model_type(self):
-        """Auto-detect model type based on source"""
+        logger.info("Initializing QwQ-32B model for attention extraction")
         
-        if isinstance(self.model_source, str):
-            # Check if it's an Ollama model name
-            ollama_models = ["qwq32b", "llama", "mistral", "qwen"]
-            if any(model in self.model_source.lower() for model in ollama_models):
-                self.model_type = "ollama"
-            else:
-                self.model_type = "transformer"
-        else:
-            # Assume it's a transformer model object
-            self.model_type = "transformer"
-            
-    def _initialize_ollama_model(self):
-        """Initialize Ollama GGUF model for static weight analysis"""
+        # Resolve QwQ model path
+        if self.model_path is None:
+            self.model_path = self._find_qwq_model()
         
-        logger.info(f"Initializing Ollama model: {self.model_source}")
-        
-        # Resolve model name to file path
-        model_path = self._resolve_ollama_model_path(self.model_source)
-        
-        # Use the new QwQ 32B extractor
         try:
-            logger.info(f"Loading GGUF model from: {model_path}")
-            extractor = OllamaModelExtractor(model_path)
+            logger.info(f"Loading QwQ GGUF model from: {self.model_path}")
+            self.ollama_extractor = OllamaModelExtractor(self.model_path)
             
             # Get model configuration
-            config = extractor.get_model_config()
-            logger.info(f"GGUF model loaded successfully: {config}")
+            self.ollama_config = self.ollama_extractor.get_model_config()
+            logger.info(f"QwQ model loaded successfully: {self.ollama_config}")
             
-            # Extract attention weights for first layer as example
-            attention_weights = extractor.extract_attention_weights(layer_idx=0)
+            # Extract attention weights for verification
+            attention_weights = self.ollama_extractor.extract_attention_weights(layer_idx=0)
             
-            # Handle dictionary of weights vs single tensor
+            # Handle attention weights and move to GPU if available
             if isinstance(attention_weights, dict):
-                logger.info(f"Attention weights extracted: {len(attention_weights)} tensors")
+                logger.info(f"QwQ attention weights extracted: {len(attention_weights)} tensors")
                 for key, tensor in attention_weights.items():
                     logger.info(f"  {key}: {tensor.shape if hasattr(tensor, 'shape') else type(tensor)}")
                     
                 if torch.cuda.is_available():
-                    # Move all tensors to GPU
                     for key in attention_weights:
                         if hasattr(attention_weights[key], 'to'):
                             attention_weights[key] = attention_weights[key].to("cuda")
             else:
-                logger.info(f"Attention weights shape: {attention_weights.shape}")
+                logger.info(f"QwQ attention weights shape: {attention_weights.shape}")
                 
                 if torch.cuda.is_available():
-                    logger.info("CUDA available, transferring attention weights to GPU")
+                    logger.info("CUDA available, transferring QwQ attention weights to GPU")
                     attention_weights = attention_weights.to("cuda")
+                    
         except Exception as e:
-            logger.error(f"Error initializing Ollama model: {e}")
-            raise
+            logger.error(f"Error initializing QwQ model: {e}")
+            raise RuntimeError(f"Failed to initialize QwQ-32B model: {e}")
         
-        # Store for analysis
-        self.ollama_extractor = extractor
-        self.ollama_config = config
-        self.ollama_attention_weights = attention_weights
+        # Store attention weights for analysis
+        self.qwq_attention_weights = attention_weights
         
-    def _resolve_ollama_model_path(self, model_name: str) -> str:
-        """Resolve model name to actual GGUF file path"""
+    def _find_qwq_model(self) -> str:
+        """Find QwQ GGUF model file in standard locations"""
         
         import os
         
-        # Handle full paths directly
-        if os.path.exists(model_name):
-            return model_name
-            
-        # Try common model name mappings
-        model_mappings = {
-            'qwq': ['qwq.gguf'],
-            'qwq32b': ['qwq.gguf'],
-            'qwq-32b': ['qwq.gguf']
-        }
-        
-        # Get possible filenames for this model
-        possible_files = model_mappings.get(model_name.lower(), [f"{model_name}.gguf"])
+        # QwQ model file patterns
+        qwq_patterns = [
+            'qwq.gguf',
+            'qwq-32b.gguf', 
+            'qwq32b.gguf',
+            'QwQ-32B-Preview.gguf',
+            'qwq-32b-preview.gguf'
+        ]
         
         # Search locations
         search_paths = [
             "/workspace",
-            "/workspace/layered-context-graph",
+            "/workspaces/layer_context_seg",
+            "/workspaces/layer_context_seg/layered-context-graph",
             ".",
             "./models",
-            "../models"
+            "../models",
+            "~/models"
         ]
         
-        # Try to find the file
+        # Expand home directory
+        search_paths = [os.path.expanduser(path) for path in search_paths]
+        
+        # Find QwQ model file
         for base_path in search_paths:
-            for filename in possible_files:
-                full_path = os.path.join(base_path, filename)
+            if not os.path.exists(base_path):
+                continue
+                
+            for pattern in qwq_patterns:
+                full_path = os.path.join(base_path, pattern)
                 if os.path.exists(full_path):
-                    logger.info(f"✅ Found model file: {full_path}")
+                    logger.info(f"✅ Found QwQ model: {full_path}")
                     return full_path
         
-        # If not found, raise informative error
+        # If not found, provide helpful error
         searched_locations = []
         for base_path in search_paths:
-            for filename in possible_files:
-                searched_locations.append(os.path.join(base_path, filename))
+            for pattern in qwq_patterns:
+                searched_locations.append(os.path.join(base_path, pattern))
         
         raise FileNotFoundError(
-            f"Could not find GGUF model file for '{model_name}'. "
-            f"Searched locations: {searched_locations}"
+            f"QwQ-32B model file not found. Please download QwQ GGUF model and place it in one of these locations:\n"
+            f"Expected filenames: {qwq_patterns}\n"
+            f"Searched locations: {searched_locations[:5]}... (and {len(searched_locations)-5} more)\n\n"
+            f"Download from: https://huggingface.co/Qwen/QwQ-32B-Preview-GGUF"
         )
         
-    def _initialize_transformer_model(self):
-        """Initialize Hugging Face transformer model"""
-        
-        if isinstance(self.model_source, str):
-            try:
-                from transformers import AutoModel, AutoTokenizer
-            except ImportError:
-                raise ImportError(
-                    "transformers library is required for transformer models. "
-                    "Install it with: pip install transformers>=4.20.0"
-                )
-            
-            logger.info(f"Loading transformer model: {self.model_source}")
-            self.model = AutoModel.from_pretrained(
-                self.model_source,
-                output_attentions=True,
-                attn_implementation="eager"  # Fix for BERT attention warning
-            )
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_source)
-        else:
-            self.model = self.model_source
-            
-    def extract_attention(self, text_or_windows: Union[str, List[str]]) -> Dict:
+    def extract_attention_for_tape_splitting(self, text_windows: List[str]) -> Dict:
         """
-        Extract attention patterns from text or context windows
+        Extract attention patterns from text windows using QwQ-32B model.
+        This is the primary method for tape splitting.
         
         Args:
-            text_or_windows: Single text string or list of context windows
+            text_windows: List of text segments to analyze
             
         Returns:
-            Dictionary containing attention weights and patterns
+            Dictionary containing QwQ attention analysis for segmentation
         """
         
-        if isinstance(text_or_windows, str):
-            text_or_windows = [text_or_windows]
-            
-        if self.model_type == "ollama":
-            return self._extract_ollama_attention(text_or_windows)
-        else:
-            return self._extract_transformer_attention(text_or_windows)
-            
-    def _extract_ollama_attention(self, windows: List[str]) -> Dict:
-        """Extract attention using Ollama model static weights and PyTorch integration"""
+        logger.info(f"Extracting QwQ attention patterns for {len(text_windows)} windows")
         
         all_patterns = []
         
-        # Check if extractor is properly initialized
-        if not self.ollama_extractor:
-            logger.error("Ollama extractor not initialized")
-            return {
-                'model_type': 'ollama',
-                'model_name': self.model_source,
-                'error': 'Extractor not initialized',
-                'window_patterns': []
-            }
-        
-        # For each window, analyze using PyTorch-enabled GGUF model
-        for window_idx, window in enumerate(windows):
-            logger.info(f"Processing window {window_idx+1}/{len(windows)} ({len(window)} chars)")
+        # Process each window with QwQ attention analysis
+        for window_idx, window in enumerate(text_windows):
+            logger.info(f"Processing window {window_idx+1}/{len(text_windows)} ({len(window)} chars)")
             
             try:
-                # Get attention patterns for this window
+                # Get QwQ attention patterns for this window
                 attention_patterns = self.ollama_extractor.get_attention_patterns(window)
                 
-                # Detect optimal segment boundaries based on attention
+                # Analyze attention for optimal segment boundaries
                 boundary_scores = self.ollama_extractor.analyze_attention_for_boundaries(window)
                 boundaries = self.ollama_extractor.detect_best_boundaries(window, num_segments=5)
+                
+                # Detect specialized attention heads
+                head_specializations = self._detect_qwq_head_specializations(attention_patterns)
                 
                 window_data = {
                     'window_idx': window_idx,
                     'text': window,
-                    'attention_patterns': attention_patterns,
+                    'qwq_attention_patterns': attention_patterns,
                     'boundary_scores': boundary_scores,
-                    'suggested_boundaries': boundaries,
+                    'optimal_boundaries': boundaries,
+                    'head_specializations': head_specializations,
                     'model_info': self.ollama_config
                 }
                 
                 all_patterns.append(window_data)
-                logger.info(f"Window {window_idx} processed successfully")
+                logger.info(f"Window {window_idx} processed with QwQ attention")
                 
             except Exception as e:
-                logger.error(f"Error processing window {window_idx}: {e}")
+                logger.error(f"Error processing window {window_idx} with QwQ: {e}")
                 all_patterns.append({
                     'window_idx': window_idx,
                     'text': window,
@@ -251,104 +182,133 @@ class EnhancedAttentionExtractor:
                 })
         
         return {
-            'model_type': 'ollama',
-            'model_name': self.model_source,
+            'model': 'qwq-32b',
+            'segmentation_method': 'qwq_attention_heads',
             'window_patterns': all_patterns,
             'model_config': self.ollama_config,
             'n_layers': self.ollama_config.get('n_layers', 32),
-            'n_heads': self.ollama_config.get('n_heads', 32)
+            'n_heads': self.ollama_config.get('n_heads', 32),
+            'attention_architecture': 'multi_head_attention'
         }
         
-    def _extract_transformer_attention(self, windows: List[str]) -> Dict:
-        """Extract attention using transformer model runtime"""
-        
-        all_attentions = []
-        
-        with torch.no_grad():
-            for window in windows:
-                # Tokenize
-                inputs = self.tokenizer(
-                    window,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=512
-                )
-                
-                # Forward pass
-                outputs = self.model(**inputs)
-                
-                if hasattr(outputs, 'attentions') and outputs.attentions:
-                    # Stack all attention layers
-                    attention_stack = torch.stack(outputs.attentions)
-                    all_attentions.append(attention_stack)
-                    
-        return {
-            'model_type': 'transformer',
-            'model_name': self.model_source if isinstance(self.model_source, str) else "custom",
-            'attention_tensors': all_attentions,
-            'n_layers': len(all_attentions[0]) if all_attentions else 0,
-            'n_heads': all_attentions[0].shape[2] if all_attentions else 0
-        }
-        
-    def analyze_patterns(self, attention_data: Dict) -> Dict:
+    def analyze_qwq_attention_patterns(self, attention_data: Dict) -> Dict:
         """
-        Analyze attention patterns to identify semantic relationships
+        Analyze QwQ attention patterns to identify optimal segmentation points
         
         Args:
-            attention_data: Output from extract_attention
+            attention_data: Output from extract_attention_for_tape_splitting
             
         Returns:
-            Analysis results including clusters and relationships
+            Analysis results with segmentation recommendations
         """
         
         analysis = {
-            'pattern_clusters': [],
-            'semantic_groups': [],
-            'attention_flow': []
+            'segmentation_strategy': 'qwq_attention_based',
+            'segment_boundaries': [],
+            'attention_flow_analysis': {},
+            'head_specialization_patterns': {},
+            'confidence_scores': []
         }
         
-        if attention_data['model_type'] == 'ollama':
-            analysis.update(self._analyze_ollama_patterns(attention_data))
+        # Process each window's QwQ attention patterns
+        for window_data in attention_data['window_patterns']:
+            if 'error' in window_data:
+                continue
+                
+            window_idx = window_data['window_idx']
+            
+            # Extract segmentation boundaries from QwQ attention
+            boundaries = window_data.get('optimal_boundaries', [])
+            boundary_scores = window_data.get('boundary_scores', [])
+            
+            if boundaries:
+                analysis['segment_boundaries'].append({
+                    'window_idx': window_idx,
+                    'boundaries': boundaries,
+                    'confidence_scores': boundary_scores,
+                    'method': 'qwq_attention_analysis'
+                })
+                
+                # Calculate overall confidence
+                if boundary_scores:
+                    avg_confidence = sum(boundary_scores) / len(boundary_scores)
+                    analysis['confidence_scores'].append(avg_confidence)
+            
+            # Analyze QwQ head specializations
+            head_specs = window_data.get('head_specializations', {})
+            if head_specs:
+                analysis['head_specialization_patterns'][window_idx] = head_specs
+        
+        # Calculate overall segmentation confidence
+        if analysis['confidence_scores']:
+            analysis['overall_confidence'] = sum(analysis['confidence_scores']) / len(analysis['confidence_scores'])
         else:
-            analysis.update(self._analyze_transformer_patterns(attention_data))
+            analysis['overall_confidence'] = 0.0
             
         return analysis
         
-    def _analyze_ollama_patterns(self, attention_data: Dict) -> Dict:
-        """Analyze patterns from Ollama model loaded in PyTorch"""
+    def _detect_qwq_head_specializations(self, attention_patterns: Dict) -> Dict:
+        """
+        Detect QwQ-32B attention head specializations for segmentation
         
-        analysis_results = {
-            'segment_boundaries': [],
-            'layer_patterns': {},
-            'head_specializations': {}
+        Args:
+            attention_patterns: Dictionary of layer -> attention tensor from QwQ
+            
+        Returns:
+            Dictionary of QwQ head specializations
+        """
+        
+        specializations = {
+            'boundary_detection_heads': [],    # Heads good at finding segment boundaries
+            'semantic_relation_heads': [],     # Heads that connect related concepts
+            'topic_clustering_heads': [],      # Heads that group similar topics
+            'discourse_flow_heads': []         # Heads that track argument flow
         }
         
-        # Process each window
-        for window_data in attention_data['window_patterns']:
-            window_idx = window_data.get('window_idx')
+        if not attention_patterns:
+            return specializations
             
-            # Skip windows with errors
-            if 'error' in window_data:
+        # Analyze each attention head in QwQ's architecture
+        for layer_idx, layer_attention in attention_patterns.items():
+            if not isinstance(layer_attention, torch.Tensor):
                 continue
+                
+            n_heads = layer_attention.shape[0] if layer_attention.dim() > 2 else 1
             
-            # Process boundaries
-            boundaries = window_data.get('suggested_boundaries', [])
-            if boundaries:
-                analysis_results['segment_boundaries'].append({
-                    'window_idx': window_idx,
-                    'boundaries': boundaries,
-                    'boundary_scores': window_data.get('boundary_scores', [])
-                })
-            
-            # Process attention patterns
-            attention_patterns = window_data.get('attention_patterns', {})
-            
-            # Analyze head specializations
-            head_specializations = self._detect_head_specializations(attention_patterns)
-            if head_specializations:
-                analysis_results['head_specializations'][window_idx] = head_specializations
+            for head_idx in range(n_heads):
+                head_attention = layer_attention[head_idx] if layer_attention.dim() > 2 else layer_attention
+                
+                # Calculate specialization scores for this QwQ head
+                boundary_score = self._calculate_boundary_detection_score(head_attention)
+                relation_score = self._calculate_semantic_relation_score(head_attention)
+                clustering_score = self._calculate_topic_clustering_score(head_attention)
+                discourse_score = self._calculate_discourse_flow_score(head_attention)
+                
+                head_id = (int(layer_idx), int(head_idx))
+                
+                # Assign head to specialization categories (QwQ-specific thresholds)
+                if boundary_score > 1.2:  # QwQ threshold for boundary detection
+                    specializations['boundary_detection_heads'].append((head_id, boundary_score))
+                
+                if relation_score > 0.15:  # QwQ threshold for semantic relations
+                    specializations['semantic_relation_heads'].append((head_id, relation_score))
+                
+                if clustering_score > 0.08:  # QwQ threshold for topic clustering
+                    specializations['topic_clustering_heads'].append((head_id, clustering_score))
+                
+                if discourse_score > 0.12:  # QwQ threshold for discourse flow
+                    specializations['discourse_flow_heads'].append((head_id, discourse_score))
         
-        return analysis_results
+        # Sort and keep top heads for each specialization
+        top_k = 8  # Keep top 8 heads per specialization for QwQ
+        for spec_type in specializations:
+            specializations[spec_type] = sorted(
+                specializations[spec_type], 
+                key=lambda x: x[1], 
+                reverse=True
+            )[:top_k]
+            
+        return specializations
         
         # Identify layer clusters using simple thresholding
         clusters = []
@@ -618,7 +578,7 @@ class EnhancedAttentionExtractor:
 
 
 # Convenience functions for integration
-def create_attention_extractor(model_name: str = "qwq32b") -> EnhancedAttentionExtractor:
+def create_attention_extractor(model_name: str = "qwq32b") -> "EnhancedAttentionExtractor":
     """Create an attention extractor for the specified model"""
     return EnhancedAttentionExtractor(model_name)
 

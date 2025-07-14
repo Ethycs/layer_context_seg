@@ -21,8 +21,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-# Add src directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), "layered-context-graph", "src"))
+# Add src directory to path for robust execution
+project_root = Path(__file__).parent.resolve()
+src_path = project_root / "layered-context-graph" / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
 
 # Unified config import
 from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS
@@ -35,7 +38,6 @@ try:
     from partitioning.partition_manager import PartitionManager
     from graph.graph_reassembler import GraphReassembler
     from processor.language_guided_processor import LanguageGuidedProcessor
-    from main import LayeredContextGraph
 except ImportError as e:
     print(f"❌ Import error: {e}")
     print("Make sure you're running from the correct directory with all dependencies installed")

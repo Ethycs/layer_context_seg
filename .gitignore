@@ -2,3 +2,4 @@ recup_*/
 *.gguf
 *.pyc
 .env
+*.egg-info
