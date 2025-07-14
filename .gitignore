@@ -1,3 +1,4 @@
 recup_*/
 *.gguf
 *.pyc
+.env

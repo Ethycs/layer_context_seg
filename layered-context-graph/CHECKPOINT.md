@@ -2,34 +2,34 @@
 
 ## Current Status (July 13, 2025)
 
-We're enhancing the Layered Context Graph system to fully leverage attention mechanisms as described in the condensed architecture document. The system is designed to process long-context documents, segment them into meaningful partitions, extract attention patterns, build knowledge graphs, and save reorganized output.
+Enhancing the Layered Context Graph system to leverage attention mechanisms for processing long-context documents, segmenting into meaningful partitions, extracting attention patterns, building knowledge graphs, and saving reorganized output.
 
 ## Completed Work
 
-- Reviewed existing `attention_extractor.py` which provides:
-  - Basic attention pattern extraction from transformer models
-  - Support for both Hugging Face transformers and Ollama GGUF models
-  - Head specialization discovery to identify what each attention head is good at
-  - Natural language rule application to guide attention
-  - Boundary detection and semantic clustering
+- `attention_extractor.py` with basic attention pattern extraction
+- Support for Hugging Face transformers and Ollama GGUF models
+- Head specialization discovery and natural language rule application
+- Boundary detection and semantic clustering
+- NVIDIA GPU acceleration setup in dev container
 
 ## Next Steps
 
-1. **Enhance Attention-Based Partitioning**
-   - Implement the natural language rule specification approach
-   - Add support for instruction seeding to guide attention heads
-   - Implement percolation theory to ensure optimal window overlap (15-30%)
+1. **GGUF Loading Into PyTorch** - Enhance `ollama_extractor.py` to load GGUF files into PyTorch tensors
+2. **Percolation Context Windows** - Implement 15-30% overlap for optimal connectivity in `context_window.py`
+3. **Natural Language Rules** - Create instruction seeder module for rule-based attention biasing
+4. **Knowledge Graph Construction** - Build graph structure with node classification (KEEP/DELETE/TRACK)
+5. **Document Reconstruction** - Implement reverse reconstruction with programmatic attention
 
-2. **Knowledge Graph Construction**
-   - Enhance graph building to better capture relationships between partitions
-   - Implement the classification system (KEEP/DELETE/TRACK)
-   - Add aggressive deduplication with configurable threshold
+## Key Architecture Insights
 
-3. **Integrate with GPU Acceleration**
-   - Leverage NVIDIA CUDA for accelerated inference
-   - Optimize matrix operations for attention pattern analysis
+- **Attention-Driven Segmentation**: Use attention patterns instead of hand-crafted rules
+- **Head Specialization**: Different heads for different content types
+- **Percolation Theory**: 15-30% overlap optimal for window connectivity
+- **Natural Language Rules**: Describe segmentation rules in natural language to bias attention heads
+- **Interpretable System**: Visualize which heads make decisions
 
-4. **Reconstruct Documents from Graph**
+## GPU Status
+NVIDIA CUDA libraries available for PyTorch tensor acceleration.
    - Implement reverse reconstruction with programmatic attention
    - Ensure preservation of code samples and technical content
    - Support XML-based notebook output formatting
