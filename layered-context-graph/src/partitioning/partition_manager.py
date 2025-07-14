@@ -173,6 +173,9 @@ class PartitionManager:
     
     def _split_by_semantic_boundaries(self, segments):
         """Split segments at semantic boundaries (paragraphs, topic shifts)"""
+        if isinstance(segments, str):
+            segments = [segments]
+            
         new_segments = []
         for segment in segments:
             # Split by paragraphs first
@@ -216,6 +219,9 @@ class PartitionManager:
     
     def _split_by_instruction_markers(self, segments):
         """Split at special instruction markers"""
+        if isinstance(segments, str):
+            segments = [segments]
+            
         new_segments = []
         for segment in segments:
             # Look for instruction markers like <SEGMENT>, <RELATE>, etc.
@@ -232,6 +238,48 @@ class PartitionManager:
             else:
                 new_segments.append(segment)
         return new_segments
+    
+    def _split_by_syntactic_boundaries(self, segment):
+        """Split by syntactic boundaries (sentences, clauses)"""
+        if isinstance(segment, str):
+            # Split by sentence-ending punctuation
+            import re
+            sentences = re.split(r'[.!?]+', segment)
+            return [s.strip() for s in sentences if s.strip()]
+        else:
+            # If it's a list, process each item
+            result = []
+            for item in segment:
+                result.extend(self._split_by_syntactic_boundaries(item))
+            return result
+    
+    def _split_by_character_count(self, segment):
+        """Simple character-based splitting as fallback"""
+        if isinstance(segment, str):
+            if len(segment) <= self.target_segment_length:
+                return [segment]
+            
+            # Split into chunks of target length
+            chunks = []
+            for i in range(0, len(segment), self.target_segment_length):
+                chunks.append(segment[i:i + self.target_segment_length])
+            return chunks
+        else:
+            # If it's a list, process each item
+            result = []
+            for item in segment:
+                result.extend(self._split_by_character_count(item))
+            return result
+    
+    def _get_round_criteria(self, round_num):
+        """Get the criteria used for a specific round"""
+        criteria_map = {
+            0: "semantic_boundaries",
+            1: "syntactic_boundaries", 
+            2: "instruction_markers",
+            3: "character_count"
+        }
+        return criteria_map.get(round_num, "character_count")
     
     def get_segmentation_summary(self):
         """Get summary of the segmentation process"""

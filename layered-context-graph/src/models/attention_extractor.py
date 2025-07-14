@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Union, Tuple
 from pathlib import Path
 import logging
 
-from .ollama_extractor import OllamaModelExtractor
+from models.ollama_extractor import OllamaModelExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -309,251 +309,59 @@ class EnhancedAttentionExtractor:
             )[:top_k]
             
         return specializations
-        
-        # Identify layer clusters using simple thresholding
-        clusters = []
-        threshold = 0.75
-        visited = set()
-        
-        for i in range(n_layers):
-            if i in visited:
-                continue
-                
-            cluster = [i]
-            visited.add(i)
-            
-            for j in range(n_layers):
-                if j not in visited and similarity_matrix[i, j] > threshold:
-                    cluster.append(j)
-                    visited.add(j)
-                    
-            if len(cluster) > 1:
-                clusters.append(cluster)
-                
-        return {
-            'layer_clusters': clusters,
-            'similarity_matrix': similarity_matrix.tolist(),
-            'isolated_layers': [i for i in range(n_layers) if i not in visited]
-        }
-        
-    def _analyze_transformer_patterns(self, attention_data: Dict) -> Dict:
-        """Analyze patterns from transformer model"""
-        
-        attention_tensors = attention_data['attention_tensors']
-        
-        if not attention_tensors:
-            return {}
-            
-        # Compute attention statistics
-        patterns = []
-        
-        for window_attention in attention_tensors:
-            # Average attention across heads for each layer
-            layer_patterns = window_attention.mean(dim=2)  # Average over heads
-            patterns.append(layer_patterns)
-            
-        # Identify high-attention regions
-        high_attention_threshold = 0.7
-        high_attention_regions = []
-        
-        for idx, pattern in enumerate(patterns):
-            regions = torch.where(pattern > high_attention_threshold)
-            high_attention_regions.append({
-                'window': idx,
-                'regions': [(int(r[0]), int(r[1]), int(r[2])) for r in zip(*regions)]
-            })
-            
-        return {
-            'attention_statistics': {
-                'mean': [p.mean().item() for p in patterns],
-                'std': [p.std().item() for p in patterns],
-                'max': [p.max().item() for p in patterns]
-            },
-            'high_attention_regions': high_attention_regions
-        }
-        
-    def create_attention_graph(self, attention_data: Dict, text_chunks: List[str]) -> Dict:
-        """
-        Create a graph representation based on attention patterns
-        
-        Args:
-            attention_data: Output from extract_attention
-            text_chunks: Text chunks corresponding to nodes
-            
-        Returns:
-            Graph structure with nodes and edges
-        """
-        
-        nodes = []
-        edges = []
-        
-        # Create nodes from text chunks
-        for idx, chunk in enumerate(text_chunks):
-            node = {
-                'id': idx,
-                'text': chunk,
-                'attention_features': {},
-                'word_count': len(chunk.split()),
-                'char_count': len(chunk)
-            }
-            
-            # Add attention-based features based on model type
-            if attention_data['model_type'] == 'transformer' and attention_data.get('attention_tensors'):
-                # For transformer models, use attention tensor features
-                if idx < len(attention_data['attention_tensors']):
-                    attention_tensor = attention_data['attention_tensors'][idx]
-                    # Create a simple feature vector from attention
-                    if len(attention_tensor) > 0:
-                        # Average across layers and heads for a simple fingerprint
-                        feature_vector = attention_tensor.mean(dim=(0, 1, 2))  # Average all dimensions
-                        node['attention_features']['fingerprint'] = feature_vector
-                        
-            elif attention_data['model_type'] == 'ollama':
-                # For Ollama models, create features from text characteristics
-                # This is a fallback when attention patterns aren't available
-                words = chunk.split()
-                feature_vector = torch.tensor([
-                    len(words),  # word count
-                    len(chunk),  # character count
-                    chunk.count('.'),  # sentence count approximation
-                    chunk.count(','),  # complexity indicator
-                    sum(1 for w in words if len(w) > 6),  # complex words
-                ], dtype=torch.float32)
-                node['attention_features']['fingerprint'] = feature_vector
-                        
-            nodes.append(node)
-            
-        # Create edges based on similarity
-        similarity_threshold = 0.3  # Lower threshold for more connections
-        
-        for i in range(len(nodes)):
-            for j in range(i + 1, len(nodes)):
-                similarity = 0.0
-                
-                # Try attention-based similarity first
-                if ('fingerprint' in nodes[i]['attention_features'] and 
-                    'fingerprint' in nodes[j]['attention_features']):
-                    try:
-                        fingerprint_i = nodes[i]['attention_features']['fingerprint']
-                        fingerprint_j = nodes[j]['attention_features']['fingerprint']
-                        
-                        # Ensure both are tensors and same size
-                        if (isinstance(fingerprint_i, torch.Tensor) and 
-                            isinstance(fingerprint_j, torch.Tensor) and
-                            fingerprint_i.shape == fingerprint_j.shape):
-                            
-                            similarity = torch.nn.functional.cosine_similarity(
-                                fingerprint_i.unsqueeze(0),
-                                fingerprint_j.unsqueeze(0)
-                            ).item()
-                    except Exception as e:
-                        # Fall back to text-based similarity
-                        similarity = self._text_similarity(nodes[i]['text'], nodes[j]['text'])
-                else:
-                    # Use text-based similarity as fallback
-                    similarity = self._text_similarity(nodes[i]['text'], nodes[j]['text'])
-                
-                # Create edge if similarity is above threshold
-                if similarity > similarity_threshold:
-                    edges.append({
-                        'source': i,
-                        'target': j,
-                        'weight': similarity,
-                        'type': 'semantic_similarity'
-                    })
-                        
-        return {
-            'nodes': nodes,
-            'edges': edges,
-            'metadata': {
-                'model_type': attention_data['model_type'],
-                'n_nodes': len(nodes),
-                'n_edges': len(edges),
-                'similarity_threshold': similarity_threshold
-            }
-        }
     
-    def _detect_head_specializations(self, attention_patterns: Dict) -> Dict:
-        """
-        Detect what each attention head specializes in, similar to the pattern described
-        in the condensed architecture document.
+    def _calculate_boundary_detection_score(self, attention_matrix: torch.Tensor) -> float:
+        """Calculate how well this attention head detects boundaries"""
+        if not isinstance(attention_matrix, torch.Tensor):
+            return 0.0
         
-        Args:
-            attention_patterns: Dictionary of layer -> attention tensor
-            
-        Returns:
-            Dictionary of head specializations
-        """
-        specializations = {
-            'boundary_heads': [],
-            'relation_heads': [],
-            'cluster_heads': []
-        }
+        # Look for attention patterns that spike at boundaries
+        # Simple heuristic: variance in attention weights
+        try:
+            variance = attention_matrix.var().item()
+            return float(variance)
+        except:
+            return 0.0
+    
+    def _calculate_semantic_relation_score(self, attention_matrix: torch.Tensor) -> float:
+        """Calculate how well this head captures semantic relations"""
+        if not isinstance(attention_matrix, torch.Tensor):
+            return 0.0
         
-        if not attention_patterns:
-            return specializations
-            
-        # Calculate scores for each head across layers
-        for layer_idx, layer_attention in attention_patterns.items():
-            # Skip if not a tensor
-            if not isinstance(layer_attention, torch.Tensor):
-                continue
-                
-            n_heads = layer_attention.shape[0] if layer_attention.dim() > 2 else 1
-            
-            for head_idx in range(n_heads):
-                # Extract this head's attention
-                if layer_attention.dim() > 2:
-                    head_attention = layer_attention[head_idx]
-                else:
-                    head_attention = layer_attention
-                    
-                # Calculate boundary detection score
-                # High score = attention focuses within segments rather than across
-                diagonal_attention = torch.diagonal(head_attention)
-                off_diagonal = head_attention - torch.diag(diagonal_attention)
-                boundary_score = diagonal_attention.mean().item() / (off_diagonal.mean().item() + 1e-6)
-                
-                # Calculate relation detection score
-                # High score = attention connects related but distant tokens
-                seq_len = head_attention.shape[0]
-                if seq_len > 10:  # Need enough context to measure
-                    distant_attn = torch.triu(head_attention, diagonal=seq_len//2)
-                    relation_score = distant_attn.sum().item() / (head_attention.sum().item() + 1e-6)
-                else:
-                    relation_score = 0
-                
-                # Calculate clustering ability score
-                # High score = attention forms clear clusters
-                cluster_score = 0
-                if seq_len > 5:
-                    # Simple heuristic: variance of row-wise attention
-                    row_vars = torch.var(head_attention, dim=1)
-                    cluster_score = row_vars.mean().item()
-                
-                # Record this head's specializations
-                head_key = (int(layer_idx), int(head_idx))
-                
-                # Add to appropriate specialization list if score is high enough
-                if boundary_score > 1.5:  # Threshold determined empirically
-                    specializations['boundary_heads'].append((head_key, boundary_score))
-                
-                if relation_score > 0.2:  # Threshold determined empirically
-                    specializations['relation_heads'].append((head_key, relation_score))
-                
-                if cluster_score > 0.1:  # Threshold determined empirically
-                    specializations['cluster_heads'].append((head_key, cluster_score))
+        # Look for consistent attention patterns
+        try:
+            mean_attention = attention_matrix.mean().item()
+            return float(mean_attention)
+        except:
+            return 0.0
+    
+    def _calculate_topic_clustering_score(self, attention_matrix: torch.Tensor) -> float:
+        """Calculate how well this head clusters topics"""
+        if not isinstance(attention_matrix, torch.Tensor):
+            return 0.0
         
-        # Sort by score and take top-k
-        k = 5  # Take top 5 heads for each specialization
-        for spec_type in specializations:
-            specializations[spec_type] = sorted(
-                specializations[spec_type], 
-                key=lambda x: x[1], 
-                reverse=True
-            )[:k]
-            
-        return specializations
+        # Look for block-like attention patterns
+        try:
+            std_dev = attention_matrix.std().item()
+            return float(std_dev)
+        except:
+            return 0.0
+    
+    def _calculate_discourse_flow_score(self, attention_matrix: torch.Tensor) -> float:
+        """Calculate how well this head tracks discourse flow"""
+        if not isinstance(attention_matrix, torch.Tensor):
+            return 0.0
+        
+        # Look for sequential attention patterns
+        try:
+            # Simple heuristic: check diagonal dominance
+            if attention_matrix.dim() >= 2:
+                diag_sum = attention_matrix.diagonal().sum().item()
+                total_sum = attention_matrix.sum().item()
+                return float(diag_sum / total_sum) if total_sum > 0 else 0.0
+            return 0.0
+        except:
+            return 0.0
     
     def _text_similarity(self, text1: str, text2: str) -> float:
         """
@@ -580,46 +388,4 @@ class EnhancedAttentionExtractor:
 # Convenience functions for integration
 def create_attention_extractor(model_name: str = "qwq32b") -> "EnhancedAttentionExtractor":
     """Create an attention extractor for the specified model"""
-    return EnhancedAttentionExtractor(model_name)
-
-
-class AttentionExtractor:
-    """Backward compatibility wrapper for the original AttentionExtractor interface"""
-    
-    def __init__(self, model=None):
-        """Initialize with optional model parameter for backward compatibility"""
-        if model is None:
-            # Use default transformer model
-            model_name = "bert-base-uncased"
-            self.extractor = EnhancedAttentionExtractor(
-                model_source=model_name,
-                model_type="transformer"
-            )
-        else:
-            # Try to determine model type and name from the model object
-            if hasattr(model, 'name_or_path'):
-                model_name = model.name_or_path
-            else:
-                model_name = "bert-base-uncased"
-            
-            self.extractor = EnhancedAttentionExtractor(
-                model_source=model_name,
-                model_type="transformer"
-            )
-            # Store the original model for direct access if needed
-            self.model = model
-    
-    def extract_attention(self, context_windows):
-        """Extract attention patterns from context windows"""
-        return self.extractor.extract_attention(context_windows)
-    
-    def process_attention(self, attention_weights):
-        """Process attention weights (backward compatibility method)"""
-        # Simple processing for backward compatibility
-        processed_attention = []
-        for weights in attention_weights:
-            if hasattr(weights, 'mean'):
-                processed_attention.append(weights.mean(dim=1))
-            else:
-                processed_attention.append(weights)
-        return processed_attention
+    return EnhancedAttentionExtractor()
