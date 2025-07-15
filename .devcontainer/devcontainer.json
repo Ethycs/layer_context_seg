@@ -7,7 +7,11 @@
     "--ipc=host"
   ],
 
-  "postCreateCommand": "apt-get update && apt-get install -y locales && locale-gen en_US.UTF-8 && git config --global user.name 'Ethycs' && git config --global user.email 'Ethycs@users.noreply.github.com' && pip install -r requirements.txt && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && source ~/.bashrc && nvm install node && npm install -g @anthropic-ai/claude-code",
+  "mounts": [
+    "source=/usr/share/ollama/.ollama/,target=/usr/share/ollama/.ollama/,type=bind,readonly"
+  ],
+
+  "postCreateCommand": "apt-get update && apt-get install -y locales && locale-gen en_US.UTF-8 && git config --global user.name 'Ethycs' && git config --global user.email 'Ethycs@users.noreply.github.com' && pip install -r requirements.txt && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash ; source ~/.bashrc && nvm install node && npm install -g @anthropic-ai/claude-code",
 
   "containerEnv": {
     "LANG": "en_US.UTF-8",

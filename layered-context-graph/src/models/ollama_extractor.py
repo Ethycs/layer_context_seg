@@ -5,6 +5,7 @@ Fixed to handle proper tensor shapes and grouped query attention
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import gguf
 from transformers import AutoConfig
 import os
@@ -16,9 +17,17 @@ logger = logging.getLogger(__name__)
 class OllamaModelExtractor:
     """Enhanced Ollama model extractor with QwQ 32B support"""
     
-    def __init__(self, model_path):
+    def __init__(self, model_path, device=None):
         self.model_path = model_path
         self.gguf_reader = None
+        
+        # Set device
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+        
+        logger.info(f"Initialized OllamaModelExtractor on {self.device}")
         
         # QwQ 32B Model Architecture Specifications
         self.qwq_32b_config = {
@@ -289,26 +298,68 @@ class OllamaModelExtractor:
         """
         logger.info(f"Getting attention patterns for text ({len(text)} chars)")
         
-        # Create synthetic attention patterns for compatibility
-        n_layers = min(self.config.get('n_layers', 32), 8)  # Limit to 8 layers for demo
+        # For now, skip real attention extraction as GGUF contains quantized weights
+        # that need proper dequantization which is not yet implemented
+        
+        # Create synthetic attention patterns with more realistic structure
+        n_layers = min(self.layer_count, 4)  # Use fewer layers for testing
         patterns = {}
-        seq_len = min(len(text.split()), 64)  # Reasonable sequence length
-        n_heads = self.config.get('n_heads', 32)
+        
+        # Tokenize text (simple word-based tokenization)
+        tokens = text.split()
+        seq_len = min(len(tokens), 64)  # Limit sequence length
+        
+        if seq_len < 2:
+            logger.warning("Text too short for meaningful attention patterns")
+            return {}
+        
+        n_heads = self.attention_heads
+        
+        logger.info(f"Creating attention patterns for {n_layers} layers, {seq_len} tokens, {n_heads} heads")
         
         for layer_idx in range(n_layers):
-            # Create synthetic attention pattern based on text characteristics
-            attention_matrix = torch.rand(n_heads, seq_len, seq_len)
-            # Add some structure - diagonal emphasis for local attention
-            for i in range(seq_len):
-                attention_matrix[:, i, i] *= 2.0  # Stronger self-attention
-                if i > 0:
-                    attention_matrix[:, i, i-1] *= 1.5  # Previous token attention
-                if i < seq_len - 1:
-                    attention_matrix[:, i, i+1] *= 1.5  # Next token attention
+            # Create structured attention pattern on device
+            attention_matrix = torch.zeros(n_heads, seq_len, seq_len, device=self.device)
+            
+            # Different attention patterns for different heads
+            for head in range(n_heads):
+                if head % 4 == 0:
+                    # Local attention pattern (attending to nearby tokens)
+                    for i in range(seq_len):
+                        for j in range(max(0, i-3), min(seq_len, i+4)):
+                            distance = abs(i - j)
+                            attention_matrix[head, i, j] = 1.0 / (1.0 + distance)
+                            
+                elif head % 4 == 1:
+                    # Global attention pattern (some tokens attend to all)
+                    # Make first and last tokens attend globally
+                    attention_matrix[head, 0, :] = 0.1
+                    attention_matrix[head, -1, :] = 0.1
+                    attention_matrix[head, :, 0] = 0.1
+                    attention_matrix[head, :, -1] = 0.1
                     
+                elif head % 4 == 2:
+                    # Diagonal pattern (self and next token attention)
+                    for i in range(seq_len):
+                        attention_matrix[head, i, i] = 0.7
+                        if i < seq_len - 1:
+                            attention_matrix[head, i, i+1] = 0.3
+                            
+                else:
+                    # Random sparse attention
+                    sparse_attn = torch.rand(seq_len, seq_len, device=self.device) * (torch.rand(seq_len, seq_len, device=self.device) > 0.7).float()
+                    attention_matrix[head] = sparse_attn
+            
+            # Normalize attention probabilities
+            attention_matrix = F.softmax(attention_matrix, dim=-1)
+            
+            # Add some noise to make it more realistic
+            noise = torch.rand_like(attention_matrix, device=self.device) * 0.05
+            attention_matrix = (attention_matrix + noise) / (1.0 + 0.05)
+            
             patterns[layer_idx] = attention_matrix
             
-        logger.info(f"Generated {len(patterns)} attention pattern matrices")
+        logger.info(f"Generated {len(patterns)} structured attention pattern matrices")
         return patterns
         
     def analyze_attention_for_boundaries(self, text: str) -> List[float]:

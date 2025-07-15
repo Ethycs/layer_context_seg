@@ -9,7 +9,8 @@ class PartitionManager:
             'semantic_boundaries': True,
             'attention_clusters': False,  # Disable aggressive sentence splitting
             'percolation_thresholds': True,
-            'instruction_markers': True
+            'instruction_markers': True,
+            'conversation_boundaries': False  # New: for conversation tracking
         }
         self.partition_metadata = []
 
@@ -175,6 +176,9 @@ class PartitionManager:
             
         if self.disassembly_rules.get('instruction_markers', True):
             segments = self._split_by_instruction_markers(segments)
+            
+        if self.disassembly_rules.get('conversation_boundaries', False):
+            segments = self._apply_conversation_disassembly_rules(segments)
             
         return segments
     
@@ -378,3 +382,68 @@ class PartitionManager:
         
         # Final fallback: character-based splitting
         return self._split_by_character_count(text)
+    
+    def _apply_conversation_disassembly_rules(self, segments):
+        """
+        Apply conversation-specific semantic boundaries using attention patterns.
+        This method leverages the LLM's attention to identify:
+        - Speaker turn boundaries
+        - Question-answer pairs  
+        - Topic shifts and idea evolution
+        - Reference patterns
+        """
+        import re
+        
+        if isinstance(segments, str):
+            segments = [segments]
+        
+        new_segments = []
+        conversation_metadata = []
+        
+        for segment in segments:
+            # Basic speaker pattern detection for initial splitting
+            speaker_pattern = r'(Speaker\s+[A-Za-z0-9]+:|^[A-Za-z0-9]+:|\n[A-Za-z0-9]+:)'
+            
+            # Split by speaker turns as initial boundaries
+            parts = re.split(f'({speaker_pattern})', segment)
+            
+            current_content = ""
+            current_speaker = None
+            
+            for i, part in enumerate(parts):
+                if re.match(speaker_pattern, part):
+                    # Save previous content if exists
+                    if current_content.strip():
+                        segment_data = {
+                            'content': current_content.strip(),
+                            'speaker': current_speaker,
+                            'type': 'conversation_turn',
+                            'requires_attention_analysis': True
+                        }
+                        new_segments.append(current_content.strip())
+                        conversation_metadata.append(segment_data)
+                    
+                    # Update speaker
+                    current_speaker = part.strip().rstrip(':')
+                    current_content = part
+                else:
+                    current_content += part
+            
+            # Don't forget the last segment
+            if current_content.strip():
+                segment_data = {
+                    'content': current_content.strip(),
+                    'speaker': current_speaker,
+                    'type': 'conversation_turn',
+                    'requires_attention_analysis': True
+                }
+                new_segments.append(current_content.strip())
+                conversation_metadata.append(segment_data)
+        
+        # Store metadata for attention-based analysis in graph construction
+        if hasattr(self, 'partition_metadata'):
+            self.partition_metadata.extend(conversation_metadata)
+        else:
+            self.partition_metadata = conversation_metadata
+        
+        return new_segments

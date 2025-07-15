@@ -21,6 +21,7 @@ class InstructionSeeder:
             instruction_types: Dictionary mapping instruction tags to descriptions
         """
         self.instruction_types = instruction_types or {
+            # Original instruction types
             "ANALYZE": "Look for causal relationships",
             "CONNECT": "Link related concepts across time",
             "ABSTRACT": "Extract high-level themes",
@@ -30,7 +31,19 @@ class InstructionSeeder:
             "CODE": "Preserve code structure and semantics",
             "MATH": "Maintain mathematical relationships",
             "NARRATIVE": "Follow story or argument flow",
-            "TECHNICAL": "Preserve technical details"
+            "TECHNICAL": "Preserve technical details",
+            
+            # Conversation-specific instruction types
+            "SPEAKER_BOUNDARY": "Identify speaker turn changes",
+            "TOPIC_EVOLUTION": "Track how ideas develop through discussion",
+            "REFERENCE": "Highlight back-references to earlier points",
+            "AGREEMENT": "Mark consensus and agreement between speakers",
+            "DISAGREEMENT": "Identify conflicts and contradictions",
+            "QUESTION": "Detect questions being asked",
+            "ANSWER": "Identify responses to questions",
+            "CLARIFICATION": "Mark clarifying statements",
+            "SUMMARY": "Identify summarizing statements",
+            "CONCLUSION": "Detect concluding remarks"
         }
     
     def seed_instructions(self, text: str, density: float = 0.1) -> str:
@@ -215,3 +228,158 @@ class InstructionSeeder:
         """
         # Simple version - just prepend the rule
         return f"Rule: {rule}\n\nText: {text}"
+    
+    def seed_conversation_instructions(self, 
+                                     text: str, 
+                                     mode: str = 'timeline',
+                                     density: float = 0.15) -> str:
+        """
+        Seed conversation-specific instructions based on the desired segmentation mode.
+        
+        Args:
+            text: Conversation transcript
+            mode: Segmentation mode ('timeline', 'speaker', 'evolution', 'topics')
+            density: Instruction density
+            
+        Returns:
+            Text with conversation-specific instructions
+        """
+        # Mode-specific instruction sets
+        mode_instructions = {
+            'timeline': ['SPEAKER_BOUNDARY', 'BOUNDARY', 'NARRATIVE'],
+            'speaker': ['SPEAKER_BOUNDARY', 'QUESTION', 'ANSWER'],
+            'evolution': ['TOPIC_EVOLUTION', 'REFERENCE', 'CLARIFICATION'],
+            'topics': ['ABSTRACT', 'CLASSIFY', 'TOPIC_EVOLUTION'],
+            'consensus': ['AGREEMENT', 'DISAGREEMENT', 'CONCLUSION']
+        }
+        
+        # Get instructions for this mode
+        selected_types = mode_instructions.get(mode, ['BOUNDARY', 'CONNECT'])
+        
+        # Create custom instruction set
+        custom_instructions = {k: self.instruction_types[k] 
+                             for k in selected_types 
+                             if k in self.instruction_types}
+        
+        # Temporarily override instruction types
+        original_types = self.instruction_types
+        self.instruction_types = custom_instructions
+        
+        # Apply targeted seeding
+        seeded_text = self.seed_instructions(text, density)
+        
+        # Add mode-specific global instruction
+        mode_instruction = f"<SEGMENT_RULE>Organize by {mode}</SEGMENT_RULE>\n"
+        seeded_text = mode_instruction + seeded_text
+        
+        # Restore original instruction types
+        self.instruction_types = original_types
+        
+        return seeded_text
+    
+    def seed_speaker_boundaries(self, text: str) -> str:
+        """
+        Specifically seed speaker turn boundaries for better segmentation.
+        
+        Args:
+            text: Conversation text
+            
+        Returns:
+            Text with speaker boundary markers
+        """
+        import re
+        
+        # Pattern to match speaker labels
+        speaker_pattern = r'((?:^|\n)(?:Speaker\s+)?[A-Za-z0-9]+):\s*'
+        
+        # Find all speaker turns
+        parts = re.split(f'({speaker_pattern})', text)
+        
+        seeded_parts = []
+        for i, part in enumerate(parts):
+            if re.match(speaker_pattern, part):
+                # This is a speaker label - add boundary instruction
+                seeded_parts.append(f"<SPEAKER_BOUNDARY>{part}</SPEAKER_BOUNDARY>")
+            else:
+                seeded_parts.append(part)
+        
+        return ''.join(seeded_parts)
+    
+    def create_attention_bias_tensor(self, 
+                                   instruction_positions: List[int],
+                                   sequence_length: int,
+                                   instruction_type: str = 'BOUNDARY') -> 'torch.Tensor':
+        """
+        Create a bias tensor to influence attention based on instruction positions.
+        This tensor can be added to attention scores to guide the model.
+        
+        Args:
+            instruction_positions: Positions where instructions were inserted
+            sequence_length: Length of the sequence
+            instruction_type: Type of instruction for determining bias strength
+            
+        Returns:
+            Bias tensor of shape (sequence_length, sequence_length)
+        """
+        try:
+            import torch
+        except ImportError:
+            raise ImportError("PyTorch required for bias tensor creation")
+        
+        # Initialize bias matrix
+        bias = torch.zeros((sequence_length, sequence_length))
+        
+        # Different bias patterns for different instruction types
+        bias_patterns = {
+            'BOUNDARY': self._boundary_bias_pattern,
+            'SPEAKER_BOUNDARY': self._speaker_boundary_bias_pattern,
+            'REFERENCE': self._reference_bias_pattern,
+            'TOPIC_EVOLUTION': self._evolution_bias_pattern
+        }
+        
+        # Apply appropriate bias pattern
+        pattern_func = bias_patterns.get(instruction_type, self._default_bias_pattern)
+        
+        for pos in instruction_positions:
+            bias = pattern_func(bias, pos, sequence_length)
+        
+        return bias
+    
+    def _boundary_bias_pattern(self, bias: 'torch.Tensor', pos: int, seq_len: int) -> 'torch.Tensor':
+        """Create bias pattern for boundaries - reduce cross-boundary attention."""
+        # Reduce attention across the boundary
+        if pos > 0 and pos < seq_len:
+            bias[pos-1:pos+1, pos+1:] -= 0.5
+            bias[pos+1:, pos-1:pos+1] -= 0.5
+        return bias
+    
+    def _speaker_boundary_bias_pattern(self, bias: 'torch.Tensor', pos: int, seq_len: int) -> 'torch.Tensor':
+        """Create bias pattern for speaker boundaries - strong segmentation."""
+        # Strong reduction across speaker boundaries
+        if pos > 0 and pos < seq_len:
+            bias[pos-1:pos+1, pos+1:] -= 1.0
+            bias[pos+1:, pos-1:pos+1] -= 1.0
+        return bias
+    
+    def _reference_bias_pattern(self, bias: 'torch.Tensor', pos: int, seq_len: int) -> 'torch.Tensor':
+        """Create bias pattern for references - enhance long-range attention."""
+        # Boost attention to earlier positions (references look backward)
+        if pos > 0:
+            bias[pos, :pos] += 0.3
+        return bias
+    
+    def _evolution_bias_pattern(self, bias: 'torch.Tensor', pos: int, seq_len: int) -> 'torch.Tensor':
+        """Create bias pattern for topic evolution - enhance local coherence."""
+        # Boost attention in local neighborhood
+        window = 3
+        start = max(0, pos - window)
+        end = min(seq_len, pos + window + 1)
+        bias[start:end, start:end] += 0.2
+        return bias
+    
+    def _default_bias_pattern(self, bias: 'torch.Tensor', pos: int, seq_len: int) -> 'torch.Tensor':
+        """Default bias pattern - mild local enhancement."""
+        # Slight boost to local attention
+        if pos > 0 and pos < seq_len - 1:
+            bias[pos-1:pos+2, pos-1:pos+2] += 0.1
+        return bias

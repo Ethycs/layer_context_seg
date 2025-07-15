@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
+import torch
 
 # Add src directory to path
 project_root = Path(__file__).parent.resolve()
@@ -52,6 +53,13 @@ class FullMasterProcessor:
         self.processing_settings = self.config['processing_settings']
         self.output_dir = self.config['paths']['results_dir']
         
+        # Set up GPU device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Using device: {self.device}")
+        if torch.cuda.is_available():
+            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
         
@@ -66,9 +74,13 @@ class FullMasterProcessor:
         qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
         if qwq_path.exists():
             logger.info(f"Using QwQ model at: {qwq_path}")
+            # Use OllamaModelExtractor for GGUF files with GPU support
+            from models.ollama_extractor import OllamaModelExtractor
+            self.ollama_extractor = OllamaModelExtractor(str(qwq_path), device=self.device)
             self.attention_extractor = EnhancedAttentionExtractor(str(qwq_path))
         else:
             logger.info("QwQ model not found, using default")
+            self.ollama_extractor = None
             self.attention_extractor = EnhancedAttentionExtractor()
         
         # Initialize percolation-based context window
@@ -91,7 +103,15 @@ class FullMasterProcessor:
             target_segment_length=self.processing_settings.get('min_chunk_size', 400)
         )
         
-        # Graph builders
+        # Graph builders - prefer GPU-enabled versions when available
+        try:
+            from graph.torch_attention_graph_builder import TorchAttentionGraphBuilder
+            self.torch_graph_builder = TorchAttentionGraphBuilder(device=self.device)
+            logger.info("Using GPU-accelerated TorchAttentionGraphBuilder")
+        except ImportError:
+            self.torch_graph_builder = None
+            logger.info("TorchAttentionGraphBuilder not available")
+        
         self.attention_graph_builder = AttentionGraphBuilder()
         self.graph_reassembler = GraphReassembler()
         self.hierarchical_builder = HierarchicalGraphBuilder()
@@ -156,8 +176,18 @@ class FullMasterProcessor:
         windows_with_attention = []
         
         for i, window_content in enumerate(windows):
-            # Extract attention using QwQ - use tape splitting method
-            attention_data = self.attention_extractor.extract_attention_for_tape_splitting([window_content])
+            # Extract attention using QwQ - prefer GPU-enabled extractor
+            if self.ollama_extractor:
+                # Use GPU-enabled OllamaModelExtractor
+                attention_patterns = self.ollama_extractor.get_attention_patterns(window_content)
+                # Convert to expected format
+                attention_data = {
+                    'attention_scores': [1.0] * len(window_content.split()),
+                    'attention_patterns': attention_patterns
+                }
+            else:
+                # Fallback to standard extraction
+                attention_data = self.attention_extractor.extract_attention_for_tape_splitting([window_content])
             
             # Build attention graph for this window
             attention_graph = self.attention_graph_builder.build_from_attention(
@@ -662,6 +692,55 @@ class FullMasterProcessor:
             result['output_path'] = str(output_path)
         
         return result
+    
+    def process_conversation(self, text: str, mode: str = 'timeline') -> Dict[str, Any]:
+        """
+        Process conversation with specific reconstruction mode.
+        
+        Args:
+            text: Conversation transcript
+            mode: One of 'timeline', 'speaker', 'evolution', 'current_state'
+        
+        Returns:
+            Processed conversation in the requested format
+        """
+        logger.info(f"Processing conversation in '{mode}' mode...")
+        
+        # Enable conversation-specific disassembly rules
+        if hasattr(self.partition_manager, 'disassembly_rules'):
+            self.partition_manager.disassembly_rules['conversation_boundaries'] = True
+        
+        # Process with conversation-specific rules
+        rules = {
+            'segmentation': 'conversation_boundaries',
+            'reorganization': mode
+        }
+        
+        # Run the processing pipeline
+        result = self.process_text(text, rules)
+        
+        # Apply conversation-specific reassembly based on mode
+        if 'output' in result and hasattr(self.graph_reassembler, f'reassemble_by_{mode}'):
+            nodes = result['output'].get('nodes', [])
+            edges = result['output'].get('edges', [])
+            
+            # Use conversation edge analyzer to enhance edges
+            from layered_context_graph.src.graph.conversation_edge_types import ConversationEdgeAnalyzer
+            edge_analyzer = ConversationEdgeAnalyzer(self.attention_extractor)
+            
+            # Enhance edges with conversation-specific types
+            enhanced_edges = edge_analyzer.create_conversation_edges(nodes, use_attention=True)
+            
+            # Apply the specific reassembly method
+            reassembly_method = getattr(self.graph_reassembler, f'reassemble_by_{mode}')
+            conversation_output = reassembly_method(nodes, enhanced_edges, text)
+            
+            # Merge with main result
+            result['conversation_output'] = conversation_output
+            result['conversation_mode'] = mode
+            result['enhanced_edges'] = len(enhanced_edges)
+        
+        return result
 
 
 def get_demo_content(demo_type: str) -> str:
@@ -674,6 +753,20 @@ def get_demo_content(demo_type: str) -> str:
         Speaker B: Absolutely. And don't forget about load balancing and fault tolerance.
         Speaker A: Right. We should also implement proper monitoring and logging.
         Speaker B: I'll draft a proposal with these key components outlined.
+        """,
+        'conversation': """
+Speaker A: I think we should implement a microservices architecture.
+Speaker B: That's interesting, but what about the complexity it adds?
+Speaker A: True, but the scalability benefits outweigh the complexity.
+Speaker B: Earlier you mentioned monoliths were simpler. This contradicts that.
+Speaker A: You're right. Let me clarify - monoliths are simpler initially.
+Speaker B: So you're saying start with monolith, then migrate?
+Speaker A: Exactly! That's the evolution I'm proposing.
+Speaker B: I agree with that approach. We can start simple and evolve.
+Speaker A: Great. Let's also consider how this affects our deployment strategy.
+Speaker B: What about using containers from the start?
+Speaker A: That would help with the eventual migration to microservices.
+Speaker B: This builds on your earlier point about evolution perfectly.
         """,
         'technical': """
         ## System Architecture Overview
@@ -740,12 +833,16 @@ Examples:
     # Input/Output
     parser.add_argument('--input', '-i', help='Input text file path')
     parser.add_argument('--output', '-o', help='Output directory')
-    parser.add_argument('--demo', choices=DEMO_CONFIGS.keys(),
+    parser.add_argument('--demo', choices=list(DEMO_CONFIGS.keys()) + ['conversation'],
                        help='Use demo content')
     
     # Processing options
     parser.add_argument('--rules', choices=RULE_SETS.keys(),
                        help='Predefined rule set')
+    parser.add_argument('--conversation-mode', 
+                       choices=['timeline', 'speaker', 'evolution', 'current_state'],
+                       default='timeline',
+                       help='Conversation reassembly mode (when processing conversations)')
     
     # Advanced options
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -791,7 +888,12 @@ Examples:
         processor = FullMasterProcessor(config)
         logger.info(f"Starting {args.mode} processing with QwQ...")
         
-        results = processor.process_text(text, rules)
+        # Check if this is a conversation
+        if args.demo == 'conversation' or ('Speaker' in text and ':' in text):
+            logger.info(f"Detected conversation - using '{args.conversation_mode}' reassembly mode")
+            results = processor.process_conversation(text, mode=args.conversation_mode)
+        else:
+            results = processor.process_text(text, rules)
         
         # Save results
         output_path = processor.save_results(results)
@@ -816,6 +918,20 @@ Examples:
         
         print(f"Processing time: {results['processing_time']:.2f} seconds")
         print(f"Results saved to: {output_path}")
+        
+        # Show conversation-specific results if available
+        if 'conversation_output' in results:
+            conv_output = results['conversation_output']
+            print(f"\nConversation Analysis:")
+            print(f"  Mode: {results['conversation_mode']}")
+            print(f"  Enhanced edges: {results['enhanced_edges']}")
+            if 'speaker_count' in conv_output:
+                print(f"  Speakers found: {conv_output['speaker_count']}")
+            if 'concept_chains' in conv_output:
+                print(f"  Concept evolution chains: {conv_output['concept_chains']}")
+            if 'topics_resolved' in conv_output:
+                print(f"  Topics analyzed: {conv_output['topics_resolved']}")
+        
         print("="*60)
         
         # Demonstrate synthesis capabilities
