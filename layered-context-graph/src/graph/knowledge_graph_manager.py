@@ -179,9 +179,9 @@ class KnowledgeGraphManager:
                 
         return new_nodes, mappings
 
-    def _synthesize_content(self, nodes_to_merge: List[Dict[str, Any]], llm_extractor) -> str:
+    def _synthesize_content(self, nodes_to_merge: List[Dict[str, Any]], llm_client) -> str:
         """Use LLM to synthesize content from a list of nodes."""
-        if not llm_extractor:
+        if not llm_client:
             return "\n\n".join([n['content'] for n in nodes_to_merge])
             
         prompt = "The following text segments are very similar. Please synthesize them into a single, coherent, and concise paragraph that captures the core idea from all of them. Do not lose any key information.\n\n"
@@ -190,7 +190,7 @@ class KnowledgeGraphManager:
         prompt += "--- Synthesized Paragraph ---\n"
         
         try:
-            response = llm_extractor.generate_text(prompt, max_length=512)
+            response = llm_client.generate_text(prompt, max_length=512)
             return response.strip()
         except Exception as e:
             logger.error(f"LLM synthesis for condensing failed: {e}")
@@ -212,7 +212,7 @@ class KnowledgeGraphManager:
             if source == target:
                 continue
             
-            edge_tuple = tuple(sorted((source, target)))
+            edge_tuple = tuple(sorted((str(source), str(target))))
             if edge_tuple in seen_edges:
                 continue
             

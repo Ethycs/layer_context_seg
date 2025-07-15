@@ -1,5 +1,10 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 class PartitionManager:
-    def __init__(self, overlap_ratio=0.25, target_segment_length=400, max_rounds=5):
+    def __init__(self, attention_extractor=None, overlap_ratio=0.25, target_segment_length=400, max_rounds=5):
+        self.attention_extractor = attention_extractor
         self.overlap_ratio = overlap_ratio
         self.target_segment_length = target_segment_length  # Target average segment length
         self.max_rounds = max_rounds  # Maximum segmentation rounds
@@ -7,7 +12,7 @@ class PartitionManager:
         self.segmentation_history = []  # Track each round of segmentation
         self.disassembly_rules = {
             'semantic_boundaries': True,
-            'attention_clusters': False,  # Disable aggressive sentence splitting
+            'attention_clusters': True,
             'percolation_thresholds': True,
             'instruction_markers': True,
             'conversation_boundaries': False  # New: for conversation tracking
@@ -220,16 +225,39 @@ class PartitionManager:
             return [segment]
     
     def _split_by_attention_clusters(self, segments):
-        """Split segments using attention pattern analysis - less aggressive"""
-        # Only split very long segments
+        """Split segments using attention pattern analysis."""
+        if not self.attention_extractor:
+            logger.warning("Attention extractor not available, skipping attention-based splitting.")
+            return segments
+
         new_segments = []
         for segment in segments:
-            if len(segment) > self.target_segment_length * 3:
-                # Split into roughly equal parts
-                mid = len(segment) // 2
-                new_segments.extend([segment[:mid], segment[mid:]])
-            else:
+            if len(segment) < self.target_segment_length * 1.5:
                 new_segments.append(segment)
+                continue
+
+            try:
+                attention_results = self.attention_extractor.extract_attention_for_tape_splitting([segment])
+                if attention_results and attention_results.get('window_patterns'):
+                    window_data = attention_results['window_patterns'][0]
+                    boundaries = window_data.get('optimal_boundaries', [])
+                    
+                    if boundaries:
+                        logger.info(f"Found {len(boundaries)} attention boundaries for segment.")
+                        split_points = [0] + boundaries + [len(segment)]
+                        for i in range(len(split_points) - 1):
+                            start, end = split_points[i], split_points[i+1]
+                            sub_content = segment[start:end]
+                            if sub_content.strip():
+                                new_segments.append(sub_content.strip())
+                        continue
+            except Exception as e:
+                logger.error(f"Attention-based splitting failed for a segment: {e}")
+
+            # Fallback if attention splitting fails or finds no boundaries
+            mid = len(segment) // 2
+            new_segments.extend([segment[:mid], segment[mid:]])
+            
         return new_segments
     
     def _split_by_percolation_thresholds(self, segments):

@@ -43,9 +43,9 @@ class LLMConnectionPool:
         """Create a new LLM connection"""
         logger.info(f"Creating new {model_type} connection for {model_path}")
         
-        if model_type == "ollama":
-            from models.ollama_extractor import OllamaModelExtractor
-            return OllamaModelExtractor(model_path, **kwargs)
+        if model_type == "qwq":
+            from models.qwq_model import QwQModel
+            return QwQModel(model_path, **kwargs)
         elif model_type == "attention":
             from models.attention_extractor import EnhancedAttentionExtractor
             return EnhancedAttentionExtractor(model_path, **kwargs)

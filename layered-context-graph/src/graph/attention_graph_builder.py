@@ -9,6 +9,7 @@ meaningful relationships between text segments based on attention mechanisms.
 import re
 import numpy as np
 from typing import Dict, List, Optional, Union, Tuple, Any
+from .edge_detector import EdgeDetector
 
 class AttentionGraphBuilder:
     """
@@ -25,21 +26,7 @@ class AttentionGraphBuilder:
         """
         self.similarity_threshold = similarity_threshold
         self.attention_extractor = attention_extractor
-        
-        # Try to use attention-based edge detector first
-        try:
-            from .attention_based_edge_detector import AttentionBasedEdgeDetector
-            self.edge_detector = AttentionBasedEdgeDetector(attention_extractor)
-            self.use_attention_edges = True
-        except ImportError:
-            # Fall back to enhanced edge detector
-            try:
-                from .enhanced_edge_detector import EnhancedEdgeDetector
-                self.edge_detector = EnhancedEdgeDetector()
-                self.use_attention_edges = False
-            except ImportError:
-                self.edge_detector = None
-                self.use_attention_edges = False
+        self.edge_detector = EdgeDetector(attention_extractor)
     
     def build_from_attention(self, 
                            attention_data: Dict[str, Any], 
@@ -71,25 +58,18 @@ class AttentionGraphBuilder:
             segments, attention_weights, attention_data.get('tokens', [])
         )
         
-        # Add enhanced edge detection if available
-        if self.edge_detector and isinstance(graph['nodes'], list):
-            if self.use_attention_edges and hasattr(self.edge_detector, 'detect_edges_from_attention'):
-                # Use attention-based edge detection
-                enhanced_edges = self.edge_detector.detect_edges_from_attention(
-                    graph['nodes'], 
-                    attention_data
-                )
-            else:
-                # Use rule-based edge detection
-                enhanced_edges = self.edge_detector.detect_edges(graph['nodes'])
-                
+        # Use the consolidated edge detector
+        if isinstance(graph['nodes'], list):
+            # The new EdgeDetector handles both attention and rule-based detection
+            enhanced_edges = self.edge_detector.detect_edges(graph['nodes'], use_attention=True)
+            
             if enhanced_edges:
                 graph['edges'].extend(enhanced_edges)
-                # Remove duplicates
+                # Deduplication is now handled inside EdgeDetector, but we can do a final pass
                 seen = set()
                 unique_edges = []
                 for edge in graph['edges']:
-                    key = (edge.get('source'), edge.get('target'), edge.get('type', 'default'))
+                    key = tuple(sorted((edge.get('source'), edge.get('target'))))
                     if key not in seen:
                         seen.add(key)
                         unique_edges.append(edge)
@@ -207,27 +187,10 @@ class AttentionGraphBuilder:
                 'type': 'sequential'
             })
         
-        # Create additional edges based on attention patterns if available
-        if self.edge_detector and self.use_attention_edges:
-            try:
-                nodes_for_detection = [{'id': i, 'content': content} for i, content in enumerate(segments)]
-                attention_data = {'attention_patterns': attention_weights, 'tokens': tokens}
-                attention_edges = self.edge_detector.detect_edges_from_attention(nodes_for_detection, attention_data)
-                
-                # Adjust edge source/target to be indices instead of node IDs
-                for edge in attention_edges:
-                    edge['source'] = int(str(edge['source']).split('_')[-1])
-                    edge['target'] = int(str(edge['target']).split('_')[-1])
-
-                edges.extend(attention_edges)
-            except Exception as e:
-                logger.warning(f"Attention-based edge detection failed: {e}. Falling back to content-based.")
-                content_edges = self._create_content_based_edges(segments)
-                edges.extend(content_edges)
-        else:
-            # Fall back to content-based edges if no attention detector
-            content_edges = self._create_content_based_edges(segments)
-            edges.extend(content_edges)
+        # The new EdgeDetector handles this logic internally.
+        # We can add a simple content-based fallback if needed.
+        content_edges = self._create_content_based_edges(segments)
+        edges.extend(content_edges)
         
         return edges
     

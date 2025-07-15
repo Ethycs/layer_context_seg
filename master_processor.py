@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
+import time
 
 # Add src directory to path
 project_root = Path(__file__).parent.resolve()
@@ -24,14 +26,7 @@ src_path = project_root / "layered-context-graph" / "src"
 sys.path.insert(0, str(src_path))
 
 # Import config
-from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS
-
-# Import centralized graph configuration
-try:
-    from config.graph_config import GraphConfig, get_config as get_graph_config
-except ImportError:
-    GraphConfig = None
-    get_graph_config = None
+from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS, GraphConfig
 
 # Import core modules
 from models.context_window import ContextWindow
@@ -39,10 +34,9 @@ from models.attention_extractor import EnhancedAttentionExtractor
 from models.instruction_seeder import InstructionSeeder
 from partitioning.partition_manager import PartitionManager
 from graph.graph_reassembler import GraphReassembler
-from graph.attention_graph_builder import AttentionGraphBuilder
-from graph.hierarchical_graph_builder import HierarchicalGraphBuilder
-from graph.knowledge_graph_manager import KnowledgeGraphManager
-from utils.performance_monitor import Timer, timed, gpu_memory_tracked
+from graph.processor import GraphProcessor
+from synthesis.som_generator import SOM_DocumentGenerator
+from models.qwq_model import QwQModel
 
 # Try to import TorchSpectralProcessor for hybrid processing
 try:
@@ -64,7 +58,7 @@ logger = logging.getLogger(__name__)
 class FullMasterProcessor:
     """Full processor with all features including QwQ integration - Fixed for full text"""
     
-    def __init__(self, config: Dict[str, Any], graph_config: GraphConfig = None, ollama_extractor=None):
+    def __init__(self, config: Dict[str, Any], graph_config: GraphConfig = None, qwq_model=None):
         self.config = config
         self.mode = self.config['mode']
         self.model_type = self.config['model_type']
@@ -72,19 +66,8 @@ class FullMasterProcessor:
         self.processing_settings = self.config['processing_settings']
         self.output_dir = self.config['paths']['results_dir']
         
-        # Use centralized graph configuration or create from mode
-        if graph_config:
-            self.graph_config = graph_config
-        elif GraphConfig and get_graph_config:
-            # Get preset based on mode
-            preset = 'default'
-            if self.mode == 'spectral-hybrid':
-                preset = 'spectral'
-            elif 'conversation' in str(self.config.get('demo', '')):
-                preset = 'conversation'
-            self.graph_config = get_graph_config(preset)
-        else:
-            self.graph_config = None
+        # The graph_config is now part of the main config
+        self.graph_config = self.config.get('graph_config', GraphConfig())
             
         # Set up GPU device
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -97,195 +80,115 @@ class FullMasterProcessor:
         self.output_dir.mkdir(exist_ok=True)
         
         # Initialize components, using the pre-loaded model if provided
-        self._initialize_components(ollama_extractor)
+        self._initialize_components(qwq_model)
     
-    @gpu_memory_tracked
-    def _initialize_components(self, ollama_extractor=None):
-        """Initialize all processing components with QwQ"""
+    def _initialize_components(self, qwq_model=None):
+        """Initialize all processing components with a single, unified model."""
         logger.info(f"Initializing components for {self.mode} mode")
+
+        # Use the provided qwq_model or create a new one
+        if qwq_model:
+            self.qwq_model = qwq_model
+        else:
+            self.qwq_model = QwQModel(
+                model_path=self.config['model_config']['gguf_path'],
+                device=self.device
+            )
         
-        self.ollama_extractor = ollama_extractor
-        if self.ollama_extractor is None:
-            logger.info("No pre-loaded model provided, initializing new one.")
-            qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
-            if qwq_path.exists():
-                from utils.llm_connection_pool import get_global_pool
-                self.connection_pool = get_global_pool()
-                self.ollama_extractor = self.connection_pool.get_connection(
-                    str(qwq_path), "ollama", device=self.device
-                )
-            else:
-                self.ollama_extractor = None
-        
-        from models.attention_extractor import EnhancedAttentionExtractor
+        # The EnhancedAttentionExtractor will now use the unified model
         self.attention_extractor = EnhancedAttentionExtractor(
-            model_path=str(self.config['paths']['project_root'] / 'qwq.gguf'),
-            ollama_extractor=self.ollama_extractor
+            model_path=str(self.config['model_config']['gguf_path']),
+            ollama_extractor=self.qwq_model # Pass the unified model
         )
         
         self.seeder = InstructionSeeder()
         
-        try:
-            from graph.torch_attention_graph_builder import TorchAttentionGraphBuilder
-            self.torch_graph_builder = TorchAttentionGraphBuilder(device=self.device)
-            logger.info("Using GPU-accelerated TorchAttentionGraphBuilder")
-        except ImportError:
-            self.torch_graph_builder = None
-            logger.info("TorchAttentionGraphBuilder not available")
-        
-        self.attention_graph_builder = AttentionGraphBuilder(
-            attention_extractor=self.attention_extractor
+        self.graph_processor = GraphProcessor(
+            attention_extractor=self.attention_extractor,
+            ollama_extractor=self.qwq_model # Pass the unified model
         )
-        
-        self.condenser = GraphCondenser(self.ollama_extractor)
-        
-self.graph_reassembler = GraphReassembler()
-logger.info("Using unified graph reassembler with multiple strategies")
-            
-        self.hierarchical_builder = HierarchicalGraphBuilder()
+        self.graph_reassembler = GraphReassembler()
+        self.partitioner = PartitionManager(self.attention_extractor)
+
+        # Initialize SOM Generator
+        self.som_generator = SOM_DocumentGenerator(
+            llm_client=self.qwq_model, # Pass the unified model
+            embedding_model=self.graph_processor.embedding_model,
+            partitioner=self.partitioner
+        )
+        logger.info("Initialized core components for all pipelines.")
     
     def process_text(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """Process text using the configured mode"""
-        return self._process_single_pass(text, rules)
+        if self.mode == 'som-pipeline':
+            return self._process_som_pipeline(text)
+        else: # Default to single-pass
+            return self._process_single_pass(text, rules)
     
-    def _hierarchical_partition(self, text: str) -> List[Dict[str, Any]]:
-        """Performs hierarchical, iterative segmentation of a text document."""
-        logger.info("Starting hierarchical partitioning...")
+    def _process_som_pipeline(self, text: str) -> Dict[str, Any]:
+        """
+        Process text using the Self-Organizing Map pipeline.
+        """
+        logger.info("Starting SOM-based processing pipeline...")
+        start_time = time.time()
+
+        reassembled_text = self.som_generator.assemble_document(text)
         
-        initial_segment = {'content': text, 'level': 0}
-        
-        segments = self._iterative_segmentation([initial_segment])
-        
-        logger.info(f"Hierarchical partitioning complete. Generated {len(segments)} segments.")
-        return segments
-
-    def _iterative_segmentation(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Implements iterative segmentation."""
-        config = {'max_rounds': 5, 'target_segment_size': 400, 'min_segment_size': 100, 'max_segment_size': 1200}
-        for i in range(config['max_rounds']):
-            logger.info(f"--- Partitioning Round {i+1}/{config['max_rounds']} ---")
-            
-            new_segments = []
-            for segment in segments:
-                if len(segment['content']) <= config['max_segment_size']:
-                    new_segments.append(segment)
-                    continue
-                
-                sub_segments = self._split_by_attention(segment)
-                new_segments.extend(sub_segments)
-            
-            if len(new_segments) == len(segments):
-                logger.info("Convergence reached.")
-                break
-            
-            segments = new_segments
-            
-        return segments
-
-    def _split_by_attention(self, segment: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Uses attention to find semantic boundaries."""
-        content = segment['content']
-        logger.info(f"Applying attention-based splitting for segment of size {len(content)}")
-        try:
-            attention_results = self.attention_extractor.extract_attention_for_tape_splitting([content])
-            
-            if attention_results and attention_results.get('window_patterns'):
-                window_data = attention_results['window_patterns'][0]
-                boundaries = window_data.get('optimal_boundaries', [])
-                
-                if boundaries:
-                    logger.info(f"Found {len(boundaries)} optimal boundaries: {boundaries}")
-                    split_points = [0] + boundaries + [len(content)]
-                    sub_segments = []
-                    for i in range(len(split_points) - 1):
-                        start, end = split_points[i], split_points[i+1]
-                        sub_content = content[start:end]
-                        if sub_content.strip():
-                            sub_segments.append({'content': sub_content, 'level': segment['level'] + 1})
-                    return sub_segments
-        except Exception as e:
-            logger.error(f"Attention-based splitting failed: {e}. Falling back to simpler method.")
-
-        logger.info(f"Applying fallback splitting for segment of size {len(content)}")
-        midpoint = len(content) // 2
-        return [
-            {'content': content[:midpoint], 'level': segment['level'] + 1},
-            {'content': content[midpoint:], 'level': segment['level'] + 1},
-        ]
-
-    def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Architecturally correct single-pass processing using hierarchical partitioning."""
-        logger.info("Starting correct single-pass processing with Hierarchical Partitioner...")
-        start_time = datetime.now()
-
-        with Timer("Hierarchical Partitioning"):
-            segments = self._hierarchical_partition(text)
-        logger.info(f"Created {len(segments)} optimal segments.")
-
-        all_nodes = []
-        for i, segment in enumerate(segments):
-            all_nodes.append({
-                'id': f'node_{i}',
-                'content': segment['content'],
-                'level': segment['level']
-            })
-        
-        all_edges = []
-        for i in range(len(all_nodes) - 1):
-            all_edges.append({
-                'source': all_nodes[i]['id'],
-                'target': all_nodes[i+1]['id'],
-                'weight': 1.0,
-                'type': 'sequential'
-            })
-
-        logger.info(f"Classifying {len(all_nodes)} nodes...")
-        if all_nodes:
-            graph_for_classification = {"nodes": all_nodes, "edges": all_edges}
-            kg_manager = KnowledgeGraphManager(graph_for_classification)
-            classified_nodes = kg_manager.classify_nodes()
-            
-            logger.info(f"Classifying relationships for {len(all_edges)} edges...")
-            all_edges = self._classify_edge_relationships(classified_nodes, all_edges)
-        else:
-            classified_nodes = []
-
-        logger.info("Condensing graph...")
-        if all_nodes:
-            # Assuming KnowledgeGraphManager is instantiated with the graph
-            kg_manager = KnowledgeGraphManager({"nodes": classified_nodes, "edges": all_edges})
-            
-            # We need an embedding model for condensation
-            embedding_model = None
-            try:
-                from sentence_transformers import SentenceTransformer
-                embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            except ImportError:
-                logger.warning("SentenceTransformers not installed, cannot condense text nodes.")
-
-            if embedding_model:
-                with Timer("Graph Condensation"):
-                    classified_nodes, all_edges = kg_manager.condense_graph(classified_nodes, all_edges, self.ollama_extractor, embedding_model)
-        
-        logger.info("Building final hierarchical graph...")
-        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(condensed_nodes, condensed_edges)
-        
-logger.info("Reassembling document from graph...")
-# Example of using a specific strategy, e.g., 'layered_assembly'
-reassembled = self.graph_reassembler.reassemble(hierarchical_nodes, tree_edges, strategy="layered_assembly", original_document=text)
-
-        processing_time = (datetime.now() - start_time).total_seconds()
+        processing_time = time.time() - start_time
 
         return {
-            'mode': 'hierarchical-single-pass',
+            'mode': 'som-pipeline',
             'input_length': len(text),
-            'nodes': len(classified_nodes),
-            'edges': len(all_edges),
+            'processing_time': processing_time,
+            'output': {'reassembled_text': reassembled_text},
+            'metadata': {
+                'model': 'QwQ-32B + MiniLM-L6-v2',
+                'architecture': 'Tape-Map-Path-Tape',
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+
+    def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Process text using the simplified, three-phase pipeline.
+        """
+        logger.info("Starting refactored single-pass processing...")
+        start_time = time.time()
+
+        # 1. Disassembly Phase (Tape to Nodes)
+        logger.info("Phase 1: Partitioning text into segments...")
+        segment_contents = self.partitioner.create_partitions(text)
+        logger.info(f"Created {len(segment_contents)} optimal segments.")
+
+        # Prepare segments for graph processor, which expects a list of dicts
+        segments = [{'content': content} for content in segment_contents]
+
+        # 2. Reconstruction Phase (Nodes to Graph)
+        logger.info("Phase 2: Processing segments into a graph...")
+        graph_data = self.graph_processor.process(segments)
+        logger.info(f"Processed graph with {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
+
+        # 3. Reassembly Phase (Graph to Document)
+        logger.info("Phase 3: Reassembling document from graph...")
+        reassembled = self.graph_reassembler.reassemble(
+            graph_data['nodes'],
+            graph_data['edges'],
+            strategy="layered_assembly",
+            original_document=text
+        )
+        
+        processing_time = time.time() - start_time
+
+        return {
+            'mode': 'refactored-single-pass',
+            'input_length': len(text),
+            'nodes': len(graph_data['nodes']),
+            'edges': len(graph_data['edges']),
             'processing_time': processing_time,
             'output': reassembled,
             'metadata': {
                 'model': 'QwQ-32B',
-                'architecture': 'Hierarchical-Direct-to-Graph',
+                'architecture': 'Tape-to-Graph-Refactored',
                 'timestamp': datetime.now().isoformat()
             }
         }
@@ -300,7 +203,7 @@ reassembled = self.graph_reassembler.reassemble(hierarchical_nodes, tree_edges, 
         
         important_nodes = {n['id'] for n in nodes if n.get('classification') in ['KEEP', 'TRACK']}
         
-        for edge in edges:
+        for edge in tqdm(edges, desc="Classifying Edges"):
             source_id = edge.get('source')
             target_id = edge.get('target')
 
@@ -375,7 +278,7 @@ reassembled = self.graph_reassembler.reassemble(hierarchical_nodes, tree_edges, 
                 f.write(f"\nNODE LIST ({len(nodes)} nodes)\n")
                 f.write("-" * 60 + "\n\n")
                 
-                for i, node in enumerate(nodes):
+                for i, node in enumerate(tqdm(nodes, desc="Saving Nodes")):
                     f.write(f"Node {i} [{node.get('id', f'node_{i}')}]\n")
                     content = node.get('content', '')
                     f.write(f"Content Length: {len(content)} chars\n")
@@ -446,12 +349,13 @@ def main():
             
         from utils.llm_connection_pool import get_global_pool
         connection_pool = get_global_pool()
-        ollama_extractor = connection_pool.get_connection(
-            str(qwq_path), "ollama", device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Request the 'qwq' model type to get the unified QwQModel instance
+        qwq_model = connection_pool.get_connection(
+            str(qwq_path), "qwq", device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         )
         
-        # Pass the pre-loaded extractor to the processor
-        processor = FullMasterProcessor(config, ollama_extractor=ollama_extractor)
+        # Pass the pre-loaded model to the processor
+        processor = FullMasterProcessor(config, qwq_model=qwq_model)
         logger.info(f"Starting {args.mode} processing with pre-loaded QwQ...")
         results = processor.process_text(text)
         output_path = processor.save_results(results)
