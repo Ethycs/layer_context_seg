@@ -186,7 +186,7 @@ class QwQAttentionModel(nn.Module):
         # Transformer layers (simplified - only attention for now)
         self.layers = nn.ModuleList([
             QwQAttentionLayer(config, layer_idx, gguf_reader)
-            for layer_idx in range(min(config['num_hidden_layers'], 8))  # Limit layers for memory
+            for layer_idx in range(config['num_hidden_layers'])  # Load all layers
         ])
         
         # Final layer norm

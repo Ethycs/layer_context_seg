@@ -247,7 +247,7 @@ class TorchAttentionGraphBuilder(nn.Module):
     
     def _create_edges_from_adjacency(self, 
                                     adjacency: torch.Tensor,
-                                    threshold: float = 0.75,
+                                    threshold: float = 0.1,
                                     use_sparse: bool = True,
                                     top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -344,7 +344,8 @@ class TorchAttentionGraphBuilder(nn.Module):
                 else:
                     edge['connection_strength'] = 'weak'
         
-        logger.info(f"Created {len(edges)} edges from {n_nodes}x{n_nodes} adjacency matrix")
+        logger.info(f"Max adjacency value: {adjacency.max().item()}")
+        logger.info(f"Created {len(edges)} edges from {n_nodes}x{n_nodes} adjacency matrix with threshold {threshold}")
         return edges
     
     def build_conversation_graph(self,
