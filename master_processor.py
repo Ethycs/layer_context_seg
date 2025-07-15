@@ -7,6 +7,7 @@ This version fixes text truncation issues and ensures full content preservation.
 
 import sys
 import os
+import re
 import json
 import argparse
 import logging
@@ -287,15 +288,30 @@ class FullMasterProcessor:
             return self._process_single_pass(text, rules)
     
     def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Single-pass processing with QwQ attention extraction"""
-        logger.info("Starting single-pass processing with QwQ...")
+        """Enhanced single-pass processing with language-guided seeding and multi-round analysis"""
+        logger.info("Starting enhanced single-pass processing with QwQ...")
         
         start_time = datetime.now()
         
-        # Step 1: Create percolation-based windows
-        logger.info("Creating percolation windows...")
-        windows = self.percolation_window.create_window(text)
+        # Step 1: Apply language-guided instruction seeding
+        logger.info("Applying language-guided instruction seeding...")
+        if rules and 'segmentation' in rules:
+            logger.info(f"Using segmentation rule: {rules['segmentation']}")
+            if rules['segmentation'] == 'conversation_boundaries':
+                seeded_text = self.seeder.seed_instructions(text, density=0.15)
+            else:
+                seeded_text = self.seeder.seed_instructions(text, density=0.1)
+        else:
+            # Apply default intelligent seeding
+            seeded_text = self.seeder.seed_instructions(text, density=0.1)
+        
+        # Step 2: Create percolation-based windows from seeded text
+        logger.info("Creating percolation windows from seeded text...")
+        windows = self.percolation_window.create_window(seeded_text)
         logger.info(f"Created {len(windows)} percolation windows")
+        
+        # Store original text for formatting extraction
+        original_text = text
         
         # Step 2: Extract QwQ attention patterns for each window
         logger.info("Extracting QwQ attention patterns...")
@@ -333,12 +349,26 @@ class FullMasterProcessor:
         logger.info("Preparing data for direct graph construction...")
         all_contents = [w['content'] for w in windows_with_attention]
         
-        # Step 4: Build knowledge graph directly from attention patterns
+        # Step 4: Build knowledge graph directly from attention patterns with formatting preservation
         if self.torch_graph_builder and len(windows_with_attention) > 0:
             logger.info("Building graph directly from attention patterns using TorchAttentionGraphBuilder...")
             
+            # Extract formatting information using FormattingPreservingPartitionManager
+            logger.info("Extracting formatting information for each window...")
+            windows_with_formatting = []
+            for i, window_data in enumerate(windows_with_attention):
+                content = window_data['content']
+                
+                # Extract formatting directly from the content (which should now preserve formatting)
+                formatting = self._extract_basic_formatting(content)
+                
+                windows_with_formatting.append({
+                    **window_data,
+                    'formatting': formatting
+                })
+            
             # Create unified attention tensor from all windows
-            unified_attention_tensor = self._create_unified_attention(windows_with_attention)
+            unified_attention_tensor = self._create_unified_attention(windows_with_formatting)
             
             # Build graph directly using the TorchAttentionGraphBuilder
             graph_output = self.torch_graph_builder.forward(
@@ -348,16 +378,29 @@ class FullMasterProcessor:
             nodes = graph_output.get('nodes', [])
             edges = graph_output.get('edges', [])
             
-            # Enhance nodes with additional metadata
+            # Enhance nodes with additional metadata INCLUDING formatting
             for i, node in enumerate(nodes):
-                window_data = windows_with_attention[i] if i < len(windows_with_attention) else windows_with_attention[-1]
+                window_data = windows_with_formatting[i] if i < len(windows_with_formatting) else windows_with_formatting[-1]
+                
+                # Apply reorganization rules if provided
+                if rules and 'reorganization' in rules:
+                    importance = self._apply_reorganization_rule(
+                        node['content'],
+                        window_data['attention'],
+                        rules['reorganization']
+                    )
+                else:
+                    importance = self._calculate_importance(window_data['attention'])
+                
                 node.update({
                     'id': f'node_{i}',
                     'attention': window_data['attention'],
-                    'importance': self._calculate_importance(window_data['attention']),
+                    'importance': importance,
                     'segment_type': self._classify_segment_type(node['content']),
+                    'formatting': window_data.get('formatting', {}),  # PRESERVE FORMATTING
                     'reconstruction_layer': 0,
-                    'layer_name': 'Layer 0'
+                    'layer_name': 'Layer 0',
+                    'rule_based': rules is not None
                 })
                 
         else:
@@ -388,11 +431,76 @@ class FullMasterProcessor:
                         'type': 'sequential'
                     })
         
-        # Step 5: Build hierarchical structure
+        # Step 5: Apply multi-round annotation layers if available
+        if hasattr(self, 'annotation_layers') and self.annotation_layers:
+            logger.info("Applying multi-round annotation layers...")
+            annotations = {}
+            
+            for layer_name, layer_config in self.annotation_layers.items():
+                logger.info(f"Applying {layer_name} annotation layer...")
+                
+                # Analyze each node with layer-specific analyzer
+                layer_annotations = []
+                
+                for node in nodes:
+                    annotation = layer_config['analyzer'](
+                        node['content'],
+                        node.get('attention', {})
+                    )
+                    layer_annotations.append({
+                        'node_id': node['id'],
+                        'layer': layer_name,
+                        'features': annotation,
+                        'weight': layer_config['weight']
+                    })
+                
+                annotations[layer_name] = {
+                    'config': layer_config,
+                    'annotations': layer_annotations
+                }
+            
+            # Cross-layer synthesis
+            logger.info("Performing cross-layer synthesis...")
+            synthesis = self._synthesize_annotations(nodes, annotations)
+            
+            # Enrich nodes and edges with multi-layer insights
+            nodes = self._enrich_nodes(nodes, annotations, synthesis)
+            edges = self._enrich_edges(edges, synthesis)
+        
+        # Step 6: Enhanced edge analysis using available components
+        logger.info("Applying enhanced edge analysis...")
+        
+        # Import edge analysis components
+        try:
+            from graph.conversation_edge_types import ConversationEdgeAnalyzer
+            from graph.enhanced_edge_detector import EnhancedEdgeDetector
+            from graph.attention_based_edge_detector import AttentionBasedEdgeDetector
+            
+            # Apply conversation-specific edge analysis
+            conversation_analyzer = ConversationEdgeAnalyzer(self.attention_extractor)
+            conversation_edges = conversation_analyzer.create_conversation_edges(nodes, use_attention=True)
+            
+            # Apply enhanced edge detection
+            enhanced_detector = EnhancedEdgeDetector()
+            enhanced_edges = enhanced_detector.detect_edges(nodes)
+            
+            # Apply attention-based edge detection
+            attention_detector = AttentionBasedEdgeDetector(self.attention_extractor)
+            final_edges = attention_detector.enhance_edges_with_attention(enhanced_edges, nodes)
+            
+            # Use the enriched edges
+            edges = final_edges
+            logger.info(f"Enhanced edge analysis complete - {len(edges)} edges with rich metadata")
+            
+        except ImportError as e:
+            logger.warning(f"Enhanced edge analysis not available: {e}")
+            # Fall back to basic edges
+        
+        # Step 7: Build hierarchical structure
         logger.info("Building hierarchical graph structure...")
         hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(nodes, edges)
         
-        # Step 6: Generate analysis report (existing functionality)
+        # Step 7: Generate analysis report (existing functionality)
         logger.info("Applying reassembly rules...")
         reassembled = self.graph_reassembler.reassemble_graph(hierarchical_nodes, tree_edges, text)
         
@@ -402,7 +510,7 @@ class FullMasterProcessor:
         processing_time = (datetime.now() - start_time).total_seconds()
         
         return {
-            'mode': 'single-pass',
+            'mode': 'enhanced-single-pass',
             'input_length': len(text),
             'windows': len(windows),
             'nodes': len(nodes),
@@ -413,6 +521,11 @@ class FullMasterProcessor:
                 'model': 'QwQ-32B',
                 'percolation_overlap': '15-30%',
                 'attention_extracted': True,
+                'language_guided_seeding': True,
+                'multi_round_annotations': hasattr(self, 'annotation_layers') and bool(self.annotation_layers),
+                'direct_to_graph': True,
+                'formatting_preserved': True,
+                'rules_applied': rules is not None,
                 'timestamp': datetime.now().isoformat()
             }
         }
@@ -712,6 +825,121 @@ class FullMasterProcessor:
             unified = torch.stack(padded_matrices, dim=0).mean(dim=0).unsqueeze(0)
             
         return unified
+    
+    def _extract_basic_formatting(self, text: str) -> Dict[str, Any]:
+        """
+        Extract basic formatting information from text as fallback
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            Dictionary with formatting metadata
+        """
+        formatting = {
+            'indentation': '',
+            'line_breaks': text.count('\n'),
+            'ends_with_newline': text.endswith('\n'),
+            'leading_space': len(text) - len(text.lstrip()),
+            'trailing_space': len(text) - len(text.rstrip()),
+            'has_bold': '**' in text or '__' in text,
+            'has_italic': '*' in text and '**' not in text,
+            'has_code': '```' in text or '`' in text,
+            'heading_level': None
+        }
+        
+        # Check for markdown headings
+        lines = text.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                formatting['heading_level'] = len(stripped) - len(stripped.lstrip('#'))
+                break
+        
+        # Check for list items
+        formatting['has_list'] = any(
+            line.strip().startswith(('-', '*', '+')) or 
+            re.match(r'^\s*\d+\.', line.strip())
+            for line in lines
+        )
+        
+        # Check for conversation format
+        if any(line.strip().startswith(('User:', 'Claude:', 'Assistant:')) for line in lines):
+            formatting['speakers'] = []
+            formatting['turn_count'] = 0
+            for line in lines:
+                if ':' in line:
+                    speaker = line.split(':')[0].strip()
+                    if speaker in ['User', 'Claude', 'Assistant'] and speaker not in formatting['speakers']:
+                        formatting['speakers'].append(speaker)
+                        formatting['turn_count'] += 1
+        
+        # Check for code language
+        if '```' in text:
+            match = re.search(r'```(\w+)', text)
+            if match:
+                formatting['language'] = match.group(1)
+        
+        return formatting
+    
+    def _find_original_text_for_window(self, original_text: str, processed_content: str, window_index: int) -> str:
+        """
+        Find the original text segment that corresponds to a processed window
+        
+        Args:
+            original_text: The original unprocessed text
+            processed_content: The processed content from the window
+            window_index: Index of the window
+            
+        Returns:
+            The original text segment corresponding to the window
+        """
+        # Try to find the processed content in the original text
+        # This is a fuzzy matching approach since the processed content may have been modified
+        
+        # Clean up the processed content to find a match
+        processed_clean = processed_content.strip()
+        
+        # If the processed content is too short or empty, return it as-is
+        if len(processed_clean) < 50:
+            return processed_content
+        
+        # Try to find a substring match in the original text
+        # Use the first few words and last few words to find the boundaries
+        words = processed_clean.split()
+        if len(words) < 5:
+            return processed_content
+            
+        # Create search patterns from first and last words
+        first_words = ' '.join(words[:3])
+        last_words = ' '.join(words[-3:])
+        
+        # Find the start position
+        start_pos = original_text.find(first_words)
+        if start_pos == -1:
+            # Try with single word
+            start_pos = original_text.find(words[0])
+            if start_pos == -1:
+                return processed_content
+        
+        # Find the end position
+        end_pos = original_text.find(last_words, start_pos)
+        if end_pos == -1:
+            # Try with single word
+            end_pos = original_text.find(words[-1], start_pos)
+            if end_pos == -1:
+                return processed_content
+        
+        # Extract the original text segment
+        end_pos += len(last_words)
+        original_segment = original_text[start_pos:end_pos]
+        
+        # If the extracted segment is reasonable, return it
+        if len(original_segment) > 0 and len(original_segment) < len(processed_content) * 3:
+            return original_segment
+        else:
+            # Fallback to processed content
+            return processed_content
     
     # Annotation layer analyzers
     
@@ -1194,7 +1422,7 @@ class FullMasterProcessor:
                     
                     f.write("\n")
             
-            # Edges Summary
+            # Edges Summary with Rich Metadata
             if 'output' in results and 'edges' in results['output']:
                 edges = results['output']['edges']
                 f.write(f"\nEDGE SUMMARY ({len(edges)} edges)\n")
@@ -1209,6 +1437,27 @@ class FullMasterProcessor:
                 for edge_type, count in sorted(edge_types.items()):
                     f.write(f"  {edge_type}: {count}\n")
                 f.write("\n")
+                
+                # Show detailed edge information for first 10 edges
+                f.write("DETAILED EDGE ANALYSIS (First 10 edges)\n")
+                f.write("-" * 60 + "\n")
+                
+                for i, edge in enumerate(edges[:10]):
+                    f.write(f"Edge {i+1}: {edge.get('source', 'unknown')} → {edge.get('target', 'unknown')}\n")
+                    f.write(f"  Type: {edge.get('type', 'unknown')}\n")
+                    f.write(f"  Weight: {edge.get('weight', 0):.3f}\n")
+                    
+                    # Show metadata if available
+                    if 'metadata' in edge:
+                        metadata = edge['metadata']
+                        f.write(f"  Metadata:\n")
+                        for key, value in metadata.items():
+                            f.write(f"    {key}: {value}\n")
+                    
+                    f.write("\n")
+                
+                if len(edges) > 10:
+                    f.write(f"... and {len(edges) - 10} more edges\n\n")
             
             # Full Node Contents (for debugging)
             if 'output' in results and 'nodes' in results['output']:
@@ -1222,7 +1471,19 @@ class FullMasterProcessor:
                 
                 for i, node in enumerate(nodes):
                     f.write(f"=== Node {i} Full Content ===\n")
-                    f.write(node.get('content', '[No content]'))
+                    
+                    # Apply formatting preservation if available
+                    content = node.get('content', '[No content]')
+                    formatting = node.get('formatting', {})
+                    
+                    if formatting and hasattr(self, 'graph_reassembler') and hasattr(self.graph_reassembler, '_apply_formatting'):
+                        # Use the reassembler to apply formatting
+                        formatted_content = self.graph_reassembler._apply_formatting(content, formatting)
+                        f.write(formatted_content)
+                    else:
+                        # Fallback to raw content
+                        f.write(content)
+                    
                     f.write("\n\n")
             
             # Reconstructed Document
@@ -1596,8 +1857,6 @@ Examples:
     parser.add_argument('--graph-preset',
                        choices=['default', 'conversation', 'code', 'research', 'spectral'],
                        help='Use a preset graph configuration')
-    parser.add_argument('--preserve-formatting', action='store_true',
-                       help='Preserve original formatting in reconstruction')
     
     args = parser.parse_args()
     
@@ -1656,8 +1915,8 @@ Examples:
             else:
                 graph_config = get_graph_config('default')
         
-        # Apply formatting preservation override
-        if args.preserve_formatting and graph_config:
+        # Apply formatting preservation as default behavior
+        if graph_config:
             graph_config.reconstruction.preserve_original_formatting = True
             graph_config.reconstruction.preserve_indentation = True
             graph_config.reconstruction.preserve_empty_lines = True

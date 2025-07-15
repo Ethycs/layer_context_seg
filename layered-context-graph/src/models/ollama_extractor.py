@@ -307,7 +307,10 @@ class OllamaModelExtractor:
         
         # Tokenize text (simple word-based tokenization)
         tokens = text.split()
-        seq_len = min(len(tokens), 64)  # Limit sequence length
+        # Use a reasonable limit based on the model's context length
+        # For QwQ 32B with 131K context, use up to 2048 tokens for attention analysis
+        max_tokens = min(2048, self.qwq_32b_config['context_length'] // 64)
+        seq_len = min(len(tokens), max_tokens)
         
         if seq_len < 2:
             logger.warning("Text too short for meaningful attention patterns")

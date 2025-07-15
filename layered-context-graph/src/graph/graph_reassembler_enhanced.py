@@ -41,9 +41,75 @@ class GraphReassembler:
         return self.reassemble(G, strategy="default", original_document=original_document)
 
     def _linear_reassembly(self, graph, original_document):
-        # Basic reassembly, can be improved
-        content = [data['content'] for _, data in graph.nodes(data=True)]
-        return "\n\n".join(content)
+        # Enhanced reassembly with better formatting preservation
+        content_parts = []
+        
+        # Sort nodes by their original order if available
+        nodes_with_data = [(node_id, data) for node_id, data in graph.nodes(data=True)]
+        
+        # Try to sort by original order if node IDs contain position info
+        try:
+            nodes_with_data.sort(key=lambda x: int(x[0].split('_')[-1]) if '_' in x[0] else 0)
+        except (ValueError, IndexError):
+            # If sorting fails, keep original order
+            pass
+        
+        for node_id, data in nodes_with_data:
+            node_content = data.get('content', '')
+            
+            # Skip empty content
+            if not node_content or not node_content.strip():
+                continue
+            
+            # Preserve original formatting if available
+            formatting = data.get('formatting', {})
+            if formatting:
+                # Apply formatting preservation only if not already formatted
+                if formatting.get('has_code') and not node_content.startswith('```') and '```' not in node_content:
+                    # Only wrap in code blocks if content doesn't already have them
+                    if formatting.get('language'):
+                        node_content = f"```{formatting['language']}\n{node_content}\n```"
+                    else:
+                        node_content = f"```\n{node_content}\n```"
+                
+                # Preserve heading levels only if not already a heading
+                if formatting.get('heading_level') and not node_content.strip().startswith('#'):
+                    level = formatting['heading_level']
+                    # Only add heading markers to the first line if it's not already a heading
+                    lines = node_content.split('\n')
+                    if lines and not lines[0].strip().startswith('#'):
+                        lines[0] = f"{'#' * level} {lines[0]}"
+                        node_content = '\n'.join(lines)
+                
+                # Preserve indentation
+                if formatting.get('leading_space', 0) > 0:
+                    indent = ' ' * formatting['leading_space']
+                    lines = node_content.split('\n')
+                    node_content = '\n'.join(indent + line if line.strip() else line for line in lines)
+            
+            content_parts.append(node_content)
+        
+        # Join with appropriate spacing
+        if not content_parts:
+            return original_document or ""
+        
+        # Use more natural spacing - single newline for adjacent content, 
+        # double newline for distinct sections
+        result = []
+        for i, part in enumerate(content_parts):
+            result.append(part)
+            
+            # Add appropriate spacing between parts
+            if i < len(content_parts) - 1:
+                # Check if next part starts with a heading or code block
+                next_part = content_parts[i + 1]
+                if (next_part.startswith('#') or next_part.startswith('```') or 
+                    part.endswith('```') or part.endswith('\n')):
+                    result.append('\n')
+                else:
+                    result.append('\n\n')
+        
+        return ''.join(result)
 
     def _topological_sort_reassembly(self, graph, original_document):
         print("Reassembling with topological sort...")

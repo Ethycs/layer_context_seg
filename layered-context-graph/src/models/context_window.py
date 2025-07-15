@@ -48,11 +48,11 @@ class ContextWindow:
             if not cleaned_paragraph.strip():
                 continue
                 
-            # Check if adding this paragraph would exceed the size
-            paragraph_words = len(cleaned_paragraph.split())
-            current_words = len(current_window.split())
+            # Check if adding this paragraph would exceed the size (in characters)
+            paragraph_chars = len(cleaned_paragraph)
+            current_chars = len(current_window)
             
-            if current_words + paragraph_words > self.size and current_window:
+            if current_chars + paragraph_chars > self.size and current_window:
                 # Current window is full, apply final fluff removal and start a new one
                 cleaned_window = self._remove_fluff(current_window.strip())
                 if cleaned_window.strip():  # Only add non-empty windows
@@ -72,7 +72,8 @@ class ContextWindow:
                 windows.append(cleaned_final)
         
         # If no paragraph breaks, fall back to word-based chunking
-        if not windows or len(windows) == 1 and len(text.split()) > self.size * 1.5:
+        # Check if single window is too large (more than 1.5x the character limit)
+        if not windows or (len(windows) == 1 and len(windows[0]) > self.size * 1.5):
             windows = self._fallback_word_chunking(text)
         
         return windows
@@ -90,21 +91,25 @@ class ContextWindow:
         # Calculate optimal overlap based on percolation theory (15-30%)
         # Closer to 15% for long texts, closer to 30% for shorter texts
         # This creates a "phase transition" where information can percolate across the graph
-        if len(words) > self.size * 3:
+        
+        # Convert size from characters to approximate words (avg 5 chars per word)
+        target_words_per_window = self.size // 5
+        
+        if len(words) > target_words_per_window * 3:
             # For very long texts, use lower overlap (15%)
             overlap_ratio = 0.15
-        elif len(words) > self.size:
+        elif len(words) > target_words_per_window:
             # For medium texts, use middle overlap (20%)
             overlap_ratio = 0.20
         else:
             # For shorter texts, use higher overlap (25%)
             overlap_ratio = 0.25
             
-        overlap_size = int(self.size * overlap_ratio)
+        overlap_size = int(target_words_per_window * overlap_ratio)
         
         # Create overlapping windows to enable percolation
-        for i in range(0, len(words), self.size - overlap_size):
-            window_words = words[i:i + self.size]
+        for i in range(0, len(words), target_words_per_window - overlap_size):
+            window_words = words[i:i + target_words_per_window]
             if window_words:
                 window_text = ' '.join(window_words)
                 # Only minimal formatting cleanup
@@ -115,21 +120,17 @@ class ContextWindow:
         return windows
 
     def _remove_fluff(self, text):
-        """Remove only minimal fluff while preserving all meaningful content"""
+        """Preserve all formatting - only remove truly redundant content"""
         if not text or not text.strip():
             return ""
         
-        # Only do minimal cleanup - preserve all content
+        # Preserve all formatting - only clean up excessive blank lines
         cleaned = text
         
-        # Only clean up whitespace formatting, nothing else
-        # Replace multiple whitespace with single space
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        # Replace multiple newlines with double newline
+        # Only normalize excessive blank lines (3+ newlines to 2 newlines)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        # Clean up extra spaces
-        cleaned = cleaned.strip()
         
+        # Don't strip - preserve leading/trailing whitespace as it might be meaningful
         return cleaned
     
     def _is_in_code_block(self, original_text, current_text):
