@@ -15,14 +15,31 @@ class AttentionGraphBuilder:
     Builds knowledge graphs from attention patterns extracted from transformer models
     """
     
-    def __init__(self, similarity_threshold: float = 0.7):
+    def __init__(self, similarity_threshold: float = 0.7, attention_extractor=None):
         """
         Initialize the attention graph builder
         
         Args:
             similarity_threshold: Threshold for considering segments similar (0.0-1.0)
+            attention_extractor: Optional EnhancedAttentionExtractor for real attention patterns
         """
         self.similarity_threshold = similarity_threshold
+        self.attention_extractor = attention_extractor
+        
+        # Try to use attention-based edge detector first
+        try:
+            from .attention_based_edge_detector import AttentionBasedEdgeDetector
+            self.edge_detector = AttentionBasedEdgeDetector(attention_extractor)
+            self.use_attention_edges = True
+        except ImportError:
+            # Fall back to enhanced edge detector
+            try:
+                from .enhanced_edge_detector import EnhancedEdgeDetector
+                self.edge_detector = EnhancedEdgeDetector()
+                self.use_attention_edges = False
+            except ImportError:
+                self.edge_detector = None
+                self.use_attention_edges = False
     
     def build_from_attention(self, 
                            attention_data: Dict[str, Any], 
@@ -53,6 +70,30 @@ class AttentionGraphBuilder:
         graph['edges'] = self._create_attention_based_edges(
             segments, attention_weights, attention_data.get('tokens', [])
         )
+        
+        # Add enhanced edge detection if available
+        if self.edge_detector and isinstance(graph['nodes'], list):
+            if self.use_attention_edges and hasattr(self.edge_detector, 'detect_edges_from_attention'):
+                # Use attention-based edge detection
+                enhanced_edges = self.edge_detector.detect_edges_from_attention(
+                    graph['nodes'], 
+                    attention_data
+                )
+            else:
+                # Use rule-based edge detection
+                enhanced_edges = self.edge_detector.detect_edges(graph['nodes'])
+                
+            if enhanced_edges:
+                graph['edges'].extend(enhanced_edges)
+                # Remove duplicates
+                seen = set()
+                unique_edges = []
+                for edge in graph['edges']:
+                    key = (edge.get('source'), edge.get('target'), edge.get('type', 'default'))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_edges.append(edge)
+                graph['edges'] = unique_edges
         
         # Add classification to nodes
         graph = self._classify_nodes(graph)

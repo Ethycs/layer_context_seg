@@ -92,26 +92,11 @@ class GraphReassembler:
         
         content_parts = []
         
-        # Header with metrics
-        content_parts.append("# Layered Context Graph - Full Reconstruction\n")
-        content_parts.append("*Generated through QwQ-32B attention-based analysis*\n\n")
+        # Minimal header for standalone document
+        content_parts.append("# Reconstructed Document\n")
+        content_parts.append("*Reorganized by semantic importance and relationships*\n\n")
         
-        # Add compression metrics upfront
-        if hasattr(self, '_temp_metrics'):
-            metrics = self._temp_metrics
-            content_parts.append("## Compression & Transformation Metrics\n")
-            content_parts.append(f"- **Original Document**: {metrics.get('original_length', 0):,} characters\n")
-            content_parts.append(f"- **Node Count**: {metrics.get('node_count', 0)} segments\n")
-            content_parts.append(f"- **Average Node Size**: {metrics.get('avg_node_size', 0):.0f} characters\n")
-            content_parts.append(f"- **Information Density**: {metrics.get('information_density', 0):.2f} unique words/char\n")
-            content_parts.append("\n")
-        
-        # Add full original document for reference (not truncated)
-        if original_document:
-            content_parts.append("## Original Seed Document (Full Text)\n")
-            content_parts.append("```\n")
-            content_parts.append(original_document)  # Full text, no truncation
-            content_parts.append("\n```\n\n")
+        # Skip original document - create standalone output
         
         # Group nodes by reconstruction layer
         layers = {}
@@ -124,9 +109,7 @@ class GraphReassembler:
                 }
             layers[layer]['nodes'].append(node)
         
-        # Generate content layer by layer with FULL text
-        content_parts.append("## Layered Knowledge Structure\n\n")
-        
+        # Generate content layer by layer
         total_content_length = 0
         
         for layer_num in sorted(layers.keys()):
@@ -134,33 +117,30 @@ class GraphReassembler:
             layer_name = layer_data['name']
             layer_nodes = layer_data['nodes']
             
-            # Calculate layer statistics
-            layer_content_length = sum(len(node.get('content', '')) for node in layer_nodes)
-            total_content_length += layer_content_length
-            
-            content_parts.append(f"### Layer {layer_num + 1}: {layer_name}\n")
-            content_parts.append(f"*{len(layer_nodes)} segments | {layer_content_length:,} total characters*\n\n")
+            # Skip empty layers
+            if not layer_nodes:
+                continue
             
             # Sort nodes within layer by importance
             layer_nodes.sort(key=lambda x: x.get('importance', 0), reverse=True)
             
             for i, node in enumerate(layer_nodes, 1):
-                # Add node metadata with content length
-                node_content = node.get('content', '')
-                content_parts.append(f"#### [{layer_name} {i}/{len(layer_nodes)}] ")
-                content_parts.append(f"Node: {node['id']} | ")
-                content_parts.append(f"Type: {node.get('segment_type', 'unknown')} | ")
-                content_parts.append(f"Importance: {node.get('importance', 0):.2f} | ")
-                content_parts.append(f"Length: {len(node_content)} chars\n\n")
+                # Add section separator for readability
+                if i > 1:
+                    content_parts.append("---\n\n")
                 
-                # Add FULL node content - no truncation!
+                # Add node content directly - minimal metadata
+                node_content = node.get('content', '')
+                
+                # Optional: Add subtle metadata as a header
+                segment_type = node.get('segment_type', 'content')
+                importance = node.get('importance', 0)
+                
+                # Add content with light formatting
+                content_parts.append(f"## Section {i}: {segment_type.title().replace('_', ' ')}\n")
+                content_parts.append(f"*Importance: {importance:.0%}*\n\n")
                 content_parts.append(node_content)
                 content_parts.append("\n\n")
-                
-                # Add connections info if available
-                connections = self._get_node_connections(node['id'], reconstructed_structure['edges'])
-                if connections:
-                    content_parts.append(f"*Connections: {', '.join(connections)}*\n\n")
                 
                 # Add attention metadata if available
                 if 'attention' in node and isinstance(node['attention'], dict):

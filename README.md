@@ -152,3 +152,146 @@ The reassembly process can be enhanced by using the original document's structur
 - **Instruction Seeder**: A module to insert natural language instructions into text to guide attention heads.
 - **Attention-Based Graph Builder**: A module to build graphs directly from attention patterns.
 - **CUDA Optimization**: Add GPU acceleration for performance improvements.
+
+## 6. Master Processor Usage Guide
+
+The `master_processor.py` is the main entry point for the layered context graph system, providing a complete pipeline from text input to synthesized output.
+
+### 6.1. Basic Usage
+
+```bash
+# Process a document with default settings
+python master_processor.py --input document.txt
+
+# Use demo content
+python master_processor.py --demo simple
+
+# Specify output directory
+python master_processor.py --input document.txt --output results/
+```
+
+### 6.2. Processing Modes
+
+The system supports three main processing modes:
+
+#### **Single-Pass Mode** (Default)
+Basic processing with QwQ attention extraction.
+```bash
+python master_processor.py --input document.txt --mode single-pass
+```
+
+#### **Multi-Round Mode**
+Applies multiple annotation layers for deeper analysis.
+```bash
+python master_processor.py --input document.txt --mode multi-round
+```
+
+#### **Language-Guided Mode**
+Uses natural language rules to guide processing.
+```bash
+python master_processor.py --input document.txt --mode language-guided --rules technical_documentation
+```
+
+### 6.3. Conversation Processing
+
+For dialogue and transcript formats, use conversation-specific modes:
+
+```bash
+# Timeline mode - chronological order
+python master_processor.py --input conversation.txt --conversation-mode timeline
+
+# Speaker mode - organized by speaker
+python master_processor.py --input conversation.txt --conversation-mode speaker
+
+# Evolution mode - shows concept development
+python master_processor.py --input conversation.txt --conversation-mode evolution
+
+# Current state mode - final conclusions
+python master_processor.py --input conversation.txt --conversation-mode current_state
+
+# Research mode - extracts key insights, code, and roads not taken
+python master_processor.py --input conversation.txt --conversation-mode research
+```
+
+### 6.4. Synthesis Options (Tape₂ Generation)
+
+Generate purpose-specific documents from the knowledge graph:
+
+```bash
+# Executive summary
+python master_processor.py --input document.txt --synthesize executive_summary
+
+# Tutorial format
+python master_processor.py --input document.txt --synthesize tutorial
+
+# Technical reference
+python master_processor.py --input document.txt --synthesize reference
+
+# README documentation
+python master_processor.py --input document.txt --synthesize readme
+```
+
+### 6.5. Complete Examples
+
+```bash
+# Process a technical document and generate a tutorial
+python master_processor.py --input technical_doc.txt --mode multi-round --synthesize tutorial
+
+# Analyze a conversation and extract research insights
+python master_processor.py --input conversation.txt --conversation-mode research --synthesize executive_summary
+
+# Use demo content with verbose output
+python master_processor.py --demo technical --mode language-guided --verbose
+
+# Full pipeline with custom output
+python master_processor.py \
+    --input my_document.txt \
+    --mode multi-round \
+    --conversation-mode evolution \
+    --synthesize reference \
+    --output my_results/
+```
+
+### 6.6. Command-Line Options
+
+| Option | Description | Choices |
+|--------|-------------|---------|
+| `--input`, `-i` | Input text file path | Any valid file path |
+| `--output`, `-o` | Output directory | Any valid directory path |
+| `--demo` | Use demo content | `simple`, `technical`, `transcript`, `conversation` |
+| `--mode` | Processing mode | `single-pass`, `multi-round`, `language-guided` |
+| `--conversation-mode` | Conversation reassembly mode | `timeline`, `speaker`, `evolution`, `current_state`, `research` |
+| `--synthesize` | Generate synthesized content | `executive_summary`, `tutorial`, `reference`, `readme` |
+| `--rules` | Predefined rule set | Available rule sets from configuration |
+| `--verbose`, `-v` | Enable verbose logging | Flag (no value needed) |
+
+### 6.7. Output Files
+
+The processor generates several output files:
+
+1. **Main results**: `qwq_layered_results_[timestamp].json` - Complete processing results
+2. **Reassembled text**: `qwq_layered_results_[timestamp].txt` - Reorganized document
+3. **Synthesized content**: `synthesized_[type]_[timestamp].md` - If synthesis requested
+
+### 6.8. GPU Support
+
+The system automatically detects and uses GPU acceleration when available:
+- Supports NVIDIA CUDA GPUs
+- Falls back to CPU when GPU not available
+- Displays GPU information in verbose mode
+
+### 6.9. Research Mode Features
+
+When using `--conversation-mode research`, the system extracts:
+
+1. **Most Definitive Ideas**: Final, refined versions of concepts
+2. **Implementation Code**: Practical code examples with context
+3. **Roads Not Taken**: Alternative approaches that were rejected
+4. **Unique Early Ideas**: Interesting concepts that weren't fully developed
+5. **Concept Evolution**: How ideas changed throughout the conversation
+
+This mode is particularly useful for:
+- Analyzing design discussions
+- Extracting actionable insights from brainstorming sessions
+- Creating technical documentation from conversations
+- Understanding decision-making processes

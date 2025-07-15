@@ -82,7 +82,7 @@ class ContextWindow:
         Fallback to word-based chunking for texts without clear paragraph structure
         Using percolation theory optimal overlap (15-30%) for knowledge connectivity
         """
-        # Apply fluff removal first
+        # Apply minimal formatting cleanup only
         cleaned_text = self._remove_fluff(text)
         words = cleaned_text.split()
         windows = []
@@ -107,7 +107,7 @@ class ContextWindow:
             window_words = words[i:i + self.size]
             if window_words:
                 window_text = ' '.join(window_words)
-                # Apply final fluff removal to the window
+                # Only minimal formatting cleanup
                 final_window = self._remove_fluff(window_text)
                 if final_window.strip():  # Only add non-empty windows
                     windows.append(final_window)
@@ -115,35 +115,20 @@ class ContextWindow:
         return windows
 
     def _remove_fluff(self, text):
-        """Remove redundant content, filler words, and repetitive patterns at source"""
+        """Remove only minimal fluff while preserving all meaningful content"""
         if not text or not text.strip():
             return ""
         
-        # Remove filler words and patterns
+        # Only do minimal cleanup - preserve all content
         cleaned = text
-        for pattern in self.fluff_patterns:
-            if pattern == r'\s+':
-                # Replace multiple whitespace with single space
-                cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
-            elif pattern == r'\n{3,}':
-                # Replace multiple newlines with double newline
-                cleaned = re.sub(pattern, '\n\n', cleaned)
-            elif pattern in [r'\.{2,}', r'\?{2,}', r'!{2,}']:
-                # Replace multiple punctuation with single
-                cleaned = re.sub(pattern, pattern[-3], cleaned)
-            else:
-                # Remove filler words (but preserve in code blocks)
-                if not self._is_in_code_block(text, cleaned):
-                    cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
         
-        # Remove duplicate sentences (aggressive deduplication at source)
-        cleaned = self._remove_duplicate_sentences(cleaned)
-        
-        # Remove repetitive phrases
-        cleaned = self._remove_repetitive_phrases(cleaned)
-        
+        # Only clean up whitespace formatting, nothing else
+        # Replace multiple whitespace with single space
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        # Replace multiple newlines with double newline
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         # Clean up extra spaces
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        cleaned = cleaned.strip()
         
         return cleaned
     
@@ -153,53 +138,6 @@ class ContextWindow:
         code_markers = ['```', '`', 'def ', 'class ', 'import ', 'from ', '#!/', '</', '/>', '{}', '[]', '()']
         return any(marker in original_text for marker in code_markers)
     
-    def _remove_duplicate_sentences(self, text):
-        """Remove duplicate sentences within the text"""
-        sentences = re.split(r'[.!?]+', text)
-        seen_sentences = set()
-        unique_sentences = []
-        
-        for i, sentence in enumerate(sentences):
-            sentence_clean = sentence.strip().lower()
-            if sentence_clean and len(sentence_clean) > 10:  # Only check substantial sentences
-                if sentence_clean not in seen_sentences:
-                    seen_sentences.add(sentence_clean)
-                    # Add back the original case sentence
-                    unique_sentences.append(sentences[i].strip())
-            elif sentence.strip():  # Keep short sentences as-is
-                unique_sentences.append(sentences[i].strip())
-        
-        return '. '.join(s for s in unique_sentences if s).strip()
-    
-    def _remove_repetitive_phrases(self, text):
-        """Remove phrases that repeat within a short span"""
-        words = text.split()
-        if len(words) < 20:
-            return text  # Too short to have meaningful repetition
-        
-        # Look for phrase repetition in sliding windows
-        cleaned_words = []
-        i = 0
-        while i < len(words):
-            # Check for 3-5 word phrase repetition
-            phrase_found = False
-            for phrase_len in [5, 4, 3]:
-                if i + phrase_len * 2 <= len(words):
-                    phrase1 = ' '.join(words[i:i+phrase_len]).lower()
-                    phrase2 = ' '.join(words[i+phrase_len:i+phrase_len*2]).lower()
-                    
-                    if phrase1 == phrase2 and len(phrase1) > 15:  # Substantial phrase
-                        # Skip the repeated phrase
-                        cleaned_words.extend(words[i:i+phrase_len])
-                        i += phrase_len * 2
-                        phrase_found = True
-                        break
-            
-            if not phrase_found:
-                cleaned_words.append(words[i])
-                i += 1
-        
-        return ' '.join(cleaned_words)
 
     def get_tokens(self):
         return self.tokens
