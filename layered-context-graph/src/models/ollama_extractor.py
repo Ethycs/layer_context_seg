@@ -364,6 +364,52 @@ class OllamaModelExtractor:
             
         logger.info(f"Generated {len(patterns)} structured attention pattern matrices")
         return patterns
+    
+    def get_attention_patterns_batch(self, texts: List[str]) -> List[Dict]:
+        """
+        Get attention patterns for multiple texts in batch (more efficient)
+        
+        Args:
+            texts: List of input texts
+            
+        Returns:
+            List of dictionaries with attention patterns and analysis for each text
+        """
+        logger.info(f"Getting attention patterns for {len(texts)} texts in batch")
+        
+        batch_results = []
+        
+        # Process in smaller batches to avoid memory issues
+        batch_size = 4  # Process 4 texts at a time
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            
+            # Get attention patterns for this batch
+            batch_patterns = []
+            for text in batch:
+                try:
+                    attention_patterns = self.get_attention_patterns(text)
+                    boundary_scores = self.analyze_attention_for_boundaries(text)
+                    boundaries = self.detect_best_boundaries(text, num_segments=5)
+                    
+                    batch_patterns.append({
+                        'attention_patterns': attention_patterns,
+                        'boundary_scores': boundary_scores,
+                        'optimal_boundaries': boundaries
+                    })
+                except Exception as e:
+                    logger.error(f"Error in batch processing: {e}")
+                    batch_patterns.append({
+                        'attention_patterns': {},
+                        'boundary_scores': [],
+                        'optimal_boundaries': [],
+                        'error': str(e)
+                    })
+            
+            batch_results.extend(batch_patterns)
+        
+        logger.info(f"Batch processing complete for {len(batch_results)} texts")
+        return batch_results
         
     def analyze_attention_for_boundaries(self, text: str) -> List[float]:
         """

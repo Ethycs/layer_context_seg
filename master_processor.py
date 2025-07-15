@@ -42,7 +42,7 @@ from partitioning.partition_manager import PartitionManager
 from graph.graph_reassembler import GraphReassembler
 from graph.attention_graph_builder import AttentionGraphBuilder
 from graph.hierarchical_graph_builder import HierarchicalGraphBuilder
-
+from graph.knowledge_graph_manager import KnowledgeGraphManager
 # Try to import TorchSpectralProcessor for hybrid processing
 try:
     sys.path.insert(0, str(project_root))  # Add project root for torch_spectral_processor
@@ -102,18 +102,26 @@ class FullMasterProcessor:
         """Initialize all processing components with QwQ"""
         logger.info(f"Initializing components for {self.mode} mode")
         
-        # Initialize QwQ-based attention extractor
+        # Initialize QwQ-based attention extractor with connection pooling
         qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
         if qwq_path.exists():
             logger.info(f"Using QwQ model at: {qwq_path}")
-            # Use OllamaModelExtractor for GGUF files with GPU support
-            from models.ollama_extractor import OllamaModelExtractor
-            self.ollama_extractor = OllamaModelExtractor(str(qwq_path), device=self.device)
-            self.attention_extractor = EnhancedAttentionExtractor(str(qwq_path))
+            # Use connection pool for efficient LLM instance management
+            from utils.llm_connection_pool import get_global_pool
+            self.connection_pool = get_global_pool()
+            
+            # Get pooled connections
+            self.ollama_extractor = self.connection_pool.get_connection(
+                str(qwq_path), "ollama", device=self.device
+            )
+            self.attention_extractor = self.connection_pool.get_connection(
+                str(qwq_path), "attention"
+            )
         else:
             logger.info("QwQ model not found, using default")
             self.ollama_extractor = None
             self.attention_extractor = EnhancedAttentionExtractor()
+            self.connection_pool = None
         
         # Initialize percolation-based context window
         # Use larger window size for documents (not conversations)
@@ -288,244 +296,97 @@ class FullMasterProcessor:
             return self._process_single_pass(text, rules)
     
     def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Enhanced single-pass processing with language-guided seeding and multi-round analysis"""
-        logger.info("Starting enhanced single-pass processing with QwQ...")
-        
+        """Architecturally correct single-pass processing."""
+        logger.info("Starting correct single-pass processing...")
         start_time = datetime.now()
-        
-        # Step 1: Apply language-guided instruction seeding
-        logger.info("Applying language-guided instruction seeding...")
-        if rules and 'segmentation' in rules:
-            logger.info(f"Using segmentation rule: {rules['segmentation']}")
-            if rules['segmentation'] == 'conversation_boundaries':
-                seeded_text = self.seeder.seed_instructions(text, density=0.15)
-            else:
-                seeded_text = self.seeder.seed_instructions(text, density=0.1)
-        else:
-            # Apply default intelligent seeding
-            seeded_text = self.seeder.seed_instructions(text, density=0.1)
-        
-        # Step 2: Create percolation-based windows from seeded text
-        logger.info("Creating percolation windows from seeded text...")
-        windows = self.percolation_window.create_window(seeded_text)
-        logger.info(f"Created {len(windows)} percolation windows")
-        
-        # Store original text for formatting extraction
-        original_text = text
-        
-        # Step 2: Extract QwQ attention patterns for each window
-        logger.info("Extracting QwQ attention patterns...")
-        windows_with_attention = []
-        
+
+        # Step 1: Create overlapping windows to work with
+        logger.info("Creating percolation windows...")
+        windows = self.percolation_window.create_window(text)
+        logger.info(f"Created {len(windows)} windows.")
+
+        all_nodes = []
+        all_edges = []
+        node_offset = 0
+
+        # Step 2: Process each window individually to generate nodes
         for i, window_content in enumerate(windows):
-            # Extract attention using QwQ - prefer GPU-enabled extractor
-            if self.ollama_extractor:
-                # Use GPU-enabled OllamaModelExtractor
-                attention_patterns = self.ollama_extractor.get_attention_patterns(window_content)
-                # Convert to expected format
-                attention_data = {
-                    'attention_scores': [1.0] * len(window_content.split()),
-                    'attention_patterns': attention_patterns
-                }
-            else:
-                # Fallback to standard extraction
-                attention_data = self.attention_extractor.extract_attention_for_tape_splitting([window_content])
+            logger.info(f"Processing window {i+1}/{len(windows)}...")
             
-            # Build attention graph for this window
-            attention_graph = self.attention_graph_builder.build_from_attention(
-                [window_content],  # Pass as list
-                attention_data
-            )
+            # Extract attention for the current window
+            attention_data = self.attention_extractor.extract_attention_for_tape_splitting([window_content])
             
-            windows_with_attention.append({
-                'id': f'window_{i}',
-                'content': window_content,
-                'overlap': self.percolation_window.overlap_ratio,
-                'attention': attention_data,
-                'graph': attention_graph
-            })
-        
-        # Step 3: Prepare data for direct graph construction
-        logger.info("Preparing data for direct graph construction...")
-        all_contents = [w['content'] for w in windows_with_attention]
-        
-        # Step 4: Build knowledge graph directly from attention patterns with formatting preservation
-        if self.torch_graph_builder and len(windows_with_attention) > 0:
-            logger.info("Building graph directly from attention patterns using TorchAttentionGraphBuilder...")
-            
-            # Extract formatting information using FormattingPreservingPartitionManager
-            logger.info("Extracting formatting information for each window...")
-            windows_with_formatting = []
-            for i, window_data in enumerate(windows_with_attention):
-                content = window_data['content']
+            if not attention_data.get('attention_patterns'):
+                logger.warning(f"No attention patterns found for window {i}, skipping.")
+                continue
+
+            # Use TorchAttentionGraphBuilder to get semantic nodes and edges for this window
+            if self.torch_graph_builder:
+                # The builder expects a tensor, so we create a dummy one if needed
+                # This part needs to be robust based on actual attention_extractor output
+                attention_tensor = attention_data['attention_patterns']
+                if not isinstance(attention_tensor, torch.Tensor):
+                    attention_tensor = torch.tensor(attention_tensor, device=self.device)
                 
-                # Extract formatting directly from the content (which should now preserve formatting)
-                formatting = self._extract_basic_formatting(content)
+                # The builder works on segments, for now, we treat the whole window as one segment
+                # to let the builder's internal clustering find the nodes.
+                graph_output = self.torch_graph_builder.forward(
+                    attention_tensor=attention_tensor,
+                    text_segments=[window_content] 
+                )
                 
-                windows_with_formatting.append({
-                    **window_data,
-                    'formatting': formatting
-                })
-            
-            # Create unified attention tensor from all windows
-            unified_attention_tensor = self._create_unified_attention(windows_with_formatting)
-            
-            # Build graph directly using the TorchAttentionGraphBuilder
-            graph_output = self.torch_graph_builder.forward(
-                attention_tensor=unified_attention_tensor,
-                text_segments=all_contents
-            )
-            nodes = graph_output.get('nodes', [])
-            edges = graph_output.get('edges', [])
-            
-            # Enhance nodes with additional metadata INCLUDING formatting
-            for i, node in enumerate(nodes):
-                window_data = windows_with_formatting[i] if i < len(windows_with_formatting) else windows_with_formatting[-1]
+                window_nodes = graph_output.get('nodes', [])
+                window_edges = graph_output.get('edges', [])
+
+                # Offset node IDs to make them unique across all windows
+                id_mapping = {}
+                for node in window_nodes:
+                    original_id = node['id']
+                    new_id = f"node_{node_offset + int(original_id.split('_')[-1])}"
+                    id_mapping[original_id] = new_id
+                    node['id'] = new_id
+                    node['source_window'] = i
                 
-                # Apply reorganization rules if provided
-                if rules and 'reorganization' in rules:
-                    importance = self._apply_reorganization_rule(
-                        node['content'],
-                        window_data['attention'],
-                        rules['reorganization']
-                    )
-                else:
-                    importance = self._calculate_importance(window_data['attention'])
-                
-                node.update({
-                    'id': f'node_{i}',
-                    'attention': window_data['attention'],
-                    'importance': importance,
-                    'segment_type': self._classify_segment_type(node['content']),
-                    'formatting': window_data.get('formatting', {}),  # PRESERVE FORMATTING
-                    'reconstruction_layer': 0,
-                    'layer_name': 'Layer 0',
-                    'rule_based': rules is not None
-                })
-                
+                for edge in window_edges:
+                    edge['source'] = id_mapping.get(edge['source'], edge['source'])
+                    edge['target'] = id_mapping.get(edge['target'], edge['target'])
+
+                all_nodes.extend(window_nodes)
+                all_edges.extend(window_edges)
+                node_offset += len(window_nodes)
+
+        # Step 3: (Optional but recommended) Merge nodes that are too similar across window boundaries
+        # This would require a more sophisticated merging strategy. For now, we combine all.
+
+        # Step 4: Classify the final set of nodes
+        logger.info(f"Classifying {len(all_nodes)} nodes...")
+        if all_nodes:
+            graph_for_classification = {"nodes": all_nodes, "edges": all_edges}
+            kg_manager = KnowledgeGraphManager(graph_for_classification)
+            classified_nodes = kg_manager.classify_nodes()
         else:
-            # Fallback: create nodes directly from windows if TorchAttentionGraphBuilder not available
-            logger.info("TorchAttentionGraphBuilder not available, using fallback node creation...")
-            nodes = []
-            edges = []
-            
-            for i, window_data in enumerate(windows_with_attention):
-                content = window_data['content']
-                node = {
-                    'id': f'node_{i}',
-                    'content': content,
-                    'attention': window_data['attention'],
-                    'importance': self._calculate_importance(window_data['attention']),
-                    'segment_type': self._classify_segment_type(content),
-                    'reconstruction_layer': 0,
-                    'layer_name': 'Layer 0'
-                }
-                nodes.append(node)
-                
-                # Create sequential edges between nodes
-                if i > 0:
-                    edges.append({
-                        'source': f'node_{i-1}',
-                        'target': f'node_{i}',
-                        'weight': 1.0,
-                        'type': 'sequential'
-                    })
+            classified_nodes = []
+
+        # Step 5: Build the final hierarchical graph and reassemble the document
+        logger.info("Building final hierarchical graph...")
+        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(classified_nodes, all_edges)
         
-        # Step 5: Apply multi-round annotation layers if available
-        if hasattr(self, 'annotation_layers') and self.annotation_layers:
-            logger.info("Applying multi-round annotation layers...")
-            annotations = {}
-            
-            for layer_name, layer_config in self.annotation_layers.items():
-                logger.info(f"Applying {layer_name} annotation layer...")
-                
-                # Analyze each node with layer-specific analyzer
-                layer_annotations = []
-                
-                for node in nodes:
-                    annotation = layer_config['analyzer'](
-                        node['content'],
-                        node.get('attention', {})
-                    )
-                    layer_annotations.append({
-                        'node_id': node['id'],
-                        'layer': layer_name,
-                        'features': annotation,
-                        'weight': layer_config['weight']
-                    })
-                
-                annotations[layer_name] = {
-                    'config': layer_config,
-                    'annotations': layer_annotations
-                }
-            
-            # Cross-layer synthesis
-            logger.info("Performing cross-layer synthesis...")
-            synthesis = self._synthesize_annotations(nodes, annotations)
-            
-            # Enrich nodes and edges with multi-layer insights
-            nodes = self._enrich_nodes(nodes, annotations, synthesis)
-            edges = self._enrich_edges(edges, synthesis)
-        
-        # Step 6: Enhanced edge analysis using available components
-        logger.info("Applying enhanced edge analysis...")
-        
-        # Import edge analysis components
-        try:
-            from graph.conversation_edge_types import ConversationEdgeAnalyzer
-            from graph.enhanced_edge_detector import EnhancedEdgeDetector
-            from graph.attention_based_edge_detector import AttentionBasedEdgeDetector
-            
-            # Apply conversation-specific edge analysis
-            conversation_analyzer = ConversationEdgeAnalyzer(self.attention_extractor)
-            conversation_edges = conversation_analyzer.create_conversation_edges(nodes, use_attention=True)
-            
-            # Apply enhanced edge detection
-            enhanced_detector = EnhancedEdgeDetector()
-            enhanced_edges = enhanced_detector.detect_edges(nodes)
-            
-            # Apply attention-based edge detection
-            attention_detector = AttentionBasedEdgeDetector(self.attention_extractor)
-            final_edges = attention_detector.enhance_edges_with_attention(enhanced_edges, nodes)
-            
-            # Use the enriched edges
-            edges = final_edges
-            logger.info(f"Enhanced edge analysis complete - {len(edges)} edges with rich metadata")
-            
-        except ImportError as e:
-            logger.warning(f"Enhanced edge analysis not available: {e}")
-            # Fall back to basic edges
-        
-        # Step 7: Build hierarchical structure
-        logger.info("Building hierarchical graph structure...")
-        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(nodes, edges)
-        
-        # Step 7: Generate analysis report (existing functionality)
-        logger.info("Applying reassembly rules...")
+        logger.info("Reassembling document from graph...")
         reassembled = self.graph_reassembler.reassemble_graph(hierarchical_nodes, tree_edges, text)
-        
-        # Step 7: Add synthesis capabilities (actual Tape2 generation)
-        logger.info("Synthesis capabilities available - use synthesize_content() method")
-        
+
         processing_time = (datetime.now() - start_time).total_seconds()
-        
+
         return {
-            'mode': 'enhanced-single-pass',
+            'mode': 'direct-to-graph-single-pass',
             'input_length': len(text),
             'windows': len(windows),
-            'nodes': len(nodes),
-            'edges': len(edges),
+            'nodes': len(classified_nodes),
+            'edges': len(all_edges),
             'processing_time': processing_time,
             'output': reassembled,
             'metadata': {
                 'model': 'QwQ-32B',
-                'percolation_overlap': '15-30%',
-                'attention_extracted': True,
-                'language_guided_seeding': True,
-                'multi_round_annotations': hasattr(self, 'annotation_layers') and bool(self.annotation_layers),
-                'direct_to_graph': True,
-                'formatting_preserved': True,
-                'rules_applied': rules is not None,
+                'architecture': 'Direct-to-Graph',
                 'timestamp': datetime.now().isoformat()
             }
         }
@@ -634,26 +495,49 @@ class FullMasterProcessor:
         base_result = self._process_single_pass(text, rules)
         base_nodes = base_result['output'].get('nodes', [])
         
-        # Step 2: Apply annotation layers
+        # Step 2: Apply annotation layers with batch processing
         annotations = {}
         
+        # Batch process annotation layers for efficiency
+        logger.info("Applying annotation layers with batch processing...")
+        
+        # Prepare batch data for all layers
+        node_contents = [node['content'] for node in base_nodes]
+        node_attentions = [node.get('attention', {}) for node in base_nodes]
+        node_ids = [node['id'] for node in base_nodes]
+        
+        # Process each layer with batch-optimized analyzers
         for layer_name, layer_config in self.annotation_layers.items():
-            logger.info(f"Applying {layer_name} annotation layer...")
+            logger.info(f"Applying {layer_name} annotation layer to {len(base_nodes)} nodes...")
             
-            # Analyze each node with layer-specific analyzer
-            layer_annotations = []
-            
-            for node in base_nodes:
-                annotation = layer_config['analyzer'](
-                    node['content'],
-                    node.get('attention', {})
+            # Use batch processing if available
+            if hasattr(self, f'_batch_analyze_{layer_name}'):
+                batch_analyzer = getattr(self, f'_batch_analyze_{layer_name}')
+                try:
+                    batch_results = batch_analyzer(node_contents, node_attentions)
+                    
+                    layer_annotations = []
+                    for i, result in enumerate(batch_results):
+                        layer_annotations.append({
+                            'node_id': node_ids[i],
+                            'layer': layer_name,
+                            'features': result,
+                            'weight': layer_config['weight']
+                        })
+                    
+                    logger.info(f"Batch processing completed for {layer_name} layer")
+                    
+                except Exception as e:
+                    logger.error(f"Batch processing failed for {layer_name}: {e}, falling back to individual processing")
+                    # Fall back to individual processing
+                    layer_annotations = self._process_layer_individually(
+                        layer_name, layer_config, base_nodes
+                    )
+            else:
+                # Individual processing for layers without batch support
+                layer_annotations = self._process_layer_individually(
+                    layer_name, layer_config, base_nodes
                 )
-                layer_annotations.append({
-                    'node_id': node['id'],
-                    'layer': layer_name,
-                    'features': annotation,
-                    'weight': layer_config['weight']
-                })
             
             annotations[layer_name] = {
                 'config': layer_config,
@@ -992,6 +876,114 @@ class FullMasterProcessor:
         markers = ['moreover', 'furthermore', 'however', 'therefore', 'thus',
                   'firstly', 'secondly', 'finally', 'in conclusion']
         return any(marker in content.lower() for marker in markers)
+    
+    def _process_layer_individually(self, layer_name: str, layer_config: Dict, nodes: List[Dict]) -> List[Dict]:
+        """Process annotation layer individually when batch processing is not available"""
+        layer_annotations = []
+        
+        for node in nodes:
+            try:
+                annotation = layer_config['analyzer'](
+                    node['content'],
+                    node.get('attention', {})
+                )
+                layer_annotations.append({
+                    'node_id': node['id'],
+                    'layer': layer_name,
+                    'features': annotation,
+                    'weight': layer_config['weight']
+                })
+            except Exception as e:
+                logger.error(f"Error processing node {node['id']} with {layer_name} layer: {e}")
+                layer_annotations.append({
+                    'node_id': node['id'],
+                    'layer': layer_name,
+                    'features': {},
+                    'weight': layer_config['weight'],
+                    'error': str(e)
+                })
+        
+        return layer_annotations
+    
+    def _batch_analyze_syntactic(self, contents: List[str], attentions: List[Dict]) -> List[Dict]:
+        """Batch syntactic analysis for multiple contents"""
+        results = []
+        
+        for content in contents:
+            try:
+                # Vectorized syntactic analysis
+                words = content.split()
+                sentences = content.count('.') + content.count('!') + content.count('?')
+                
+                results.append({
+                    'sentence_count': sentences,
+                    'avg_word_length': np.mean([len(w) for w in words]) if words else 0,
+                    'complexity': len(words) / (sentences + 1)
+                })
+            except Exception as e:
+                logger.error(f"Error in batch syntactic analysis: {e}")
+                results.append({
+                    'sentence_count': 0,
+                    'avg_word_length': 0,
+                    'complexity': 0
+                })
+        
+        return results
+    
+    def _batch_analyze_semantic(self, contents: List[str], attentions: List[Dict]) -> List[Dict]:
+        """Batch semantic analysis for multiple contents"""
+        results = []
+        
+        for i, content in enumerate(contents):
+            try:
+                attention = attentions[i] if i < len(attentions) else {}
+                
+                # Vectorized semantic analysis
+                words = content.split()
+                unique_words = set(words)
+                
+                results.append({
+                    'key_terms': list(set(w for w in words if len(w) > 4))[:5],
+                    'topic_relevance': self._calculate_importance(attention),
+                    'semantic_density': len(unique_words) / len(words) if words else 0
+                })
+            except Exception as e:
+                logger.error(f"Error in batch semantic analysis: {e}")
+                results.append({
+                    'key_terms': [],
+                    'topic_relevance': 0.5,
+                    'semantic_density': 0.0
+                })
+        
+        return results
+    
+    def _batch_analyze_pragmatic(self, contents: List[str], attentions: List[Dict]) -> List[Dict]:
+        """Batch pragmatic analysis for multiple contents"""
+        results = []
+        
+        for i, content in enumerate(contents):
+            try:
+                attention = attentions[i] if i < len(attentions) else {}
+                
+                # Vectorized pragmatic analysis
+                intent = self._detect_intent(content)
+                has_markers = self._has_discourse_markers(content)
+                importance = self._calculate_importance(attention) * 1.2
+                
+                results.append({
+                    'intent': intent,
+                    'discourse_marker': has_markers,
+                    'importance': importance
+                })
+            except Exception as e:
+                logger.error(f"Error in batch pragmatic analysis: {e}")
+                results.append({
+                    'intent': 'unknown',
+                    'discourse_marker': False,
+                    'importance': 0.5
+                })
+        
+        return results
     
     def _analyze_for_research(self, nodes: List[Dict], edges: List[Dict]) -> Dict[str, Any]:
         """Analyze nodes and edges for research mode synthesis"""
@@ -1712,6 +1704,32 @@ class FullMasterProcessor:
             result['output_path'] = str(output_path)
         
         return result
+    
+    def cleanup(self):
+        """Cleanup resources including connection pool"""
+        if self.connection_pool:
+            # Return connections to pool
+            if self.ollama_extractor:
+                qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
+                self.connection_pool.return_connection(
+                    self.ollama_extractor, str(qwq_path), "ollama"
+                )
+            if self.attention_extractor:
+                qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
+                self.connection_pool.return_connection(
+                    self.attention_extractor, str(qwq_path), "attention"
+                )
+            
+            # Log pool statistics
+            stats = self.connection_pool.get_stats()
+            logger.info(f"Connection pool stats: {stats}")
+    
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        try:
+            self.cleanup()
+        except:
+            pass  # Ignore cleanup errors during destruction
     
     def process_conversation(self, text: str, mode: str = 'timeline', use_spectral: bool = None) -> Dict[str, Any]:
         """

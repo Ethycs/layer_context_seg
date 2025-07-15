@@ -208,12 +208,24 @@ class AttentionGraphBuilder:
             })
         
         # Create additional edges based on attention patterns if available
-        try:
-            # Add attention-based edges
-            attention_edges = self._extract_attention_edges(segments, attention_weights, tokens)
-            edges.extend(attention_edges)
-        except Exception as e:
-            # Fall back to content-based edges if attention processing fails
+        if self.edge_detector and self.use_attention_edges:
+            try:
+                nodes_for_detection = [{'id': i, 'content': content} for i, content in enumerate(segments)]
+                attention_data = {'attention_patterns': attention_weights, 'tokens': tokens}
+                attention_edges = self.edge_detector.detect_edges_from_attention(nodes_for_detection, attention_data)
+                
+                # Adjust edge source/target to be indices instead of node IDs
+                for edge in attention_edges:
+                    edge['source'] = int(str(edge['source']).split('_')[-1])
+                    edge['target'] = int(str(edge['target']).split('_')[-1])
+
+                edges.extend(attention_edges)
+            except Exception as e:
+                logger.warning(f"Attention-based edge detection failed: {e}. Falling back to content-based.")
+                content_edges = self._create_content_based_edges(segments)
+                edges.extend(content_edges)
+        else:
+            # Fall back to content-based edges if no attention detector
             content_edges = self._create_content_based_edges(segments)
             edges.extend(content_edges)
         

@@ -218,7 +218,7 @@ class TorchAttentionGraphBuilder(nn.Module):
     
     def _create_edges_from_adjacency(self, 
                                     adjacency: torch.Tensor,
-                                    threshold: float = 0.1) -> List[Dict[str, Any]]:
+                                    threshold: float = 0.75) -> List[Dict[str, Any]]:
         """
         Create edge list from adjacency matrix.
         """

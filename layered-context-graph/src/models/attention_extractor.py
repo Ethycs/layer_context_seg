@@ -143,13 +143,105 @@ class EnhancedAttentionExtractor:
         
         logger.info(f"Extracting QwQ attention patterns for {len(text_windows)} windows")
         
+        # Check cache first
         all_patterns = []
+        uncached_windows = []
+        uncached_indices = []
         
-        # Process each window with QwQ attention analysis
         for window_idx, window in enumerate(text_windows):
-            logger.info(f"Processing window {window_idx+1}/{len(text_windows)} ({len(window)} chars)")
+            cache_key = self._get_cache_key(window)
+            if cache_key in self.attention_cache:
+                logger.info(f"Using cached attention for window {window_idx}")
+                cached_data = self.attention_cache[cache_key].copy()
+                cached_data['window_idx'] = window_idx
+                all_patterns.append(cached_data)
+            else:
+                uncached_windows.append(window)
+                uncached_indices.append(window_idx)
+        
+        # Process uncached windows in batches
+        if uncached_windows:
+            logger.info(f"Processing {len(uncached_windows)} uncached windows in batches")
+            
+            # Use batch processing if available
+            if hasattr(self.ollama_extractor, 'get_attention_patterns_batch'):
+                try:
+                    batch_results = self.ollama_extractor.get_attention_patterns_batch(uncached_windows)
+                    
+                    for i, (window_idx, window) in enumerate(zip(uncached_indices, uncached_windows)):
+                        if i < len(batch_results):
+                            batch_result = batch_results[i]
+                            
+                            # Detect specialized attention heads
+                            head_specializations = self._detect_qwq_head_specializations(batch_result.get('attention_patterns', {}))
+                            
+                            window_data = {
+                                'window_idx': window_idx,
+                                'text': window,
+                                'qwq_attention_patterns': batch_result.get('attention_patterns', {}),
+                                'boundary_scores': batch_result.get('boundary_scores', {}),
+                                'optimal_boundaries': batch_result.get('optimal_boundaries', []),
+                                'head_specializations': head_specializations,
+                                'model_info': self.ollama_config
+                            }
+                            
+                            # Cache the result
+                            cache_key = self._get_cache_key(window)
+                            self.attention_cache[cache_key] = window_data.copy()
+                            
+                            all_patterns.append(window_data)
+                            logger.info(f"Window {window_idx} processed with batch QwQ attention")
+                        else:
+                            logger.error(f"Batch processing failed for window {window_idx}")
+                            all_patterns.append({
+                                'window_idx': window_idx,
+                                'text': window,
+                                'error': 'Batch processing failed'
+                            })
+                
+                except Exception as e:
+                    logger.error(f"Batch processing failed: {e}, falling back to individual processing")
+                    # Fall back to individual processing
+                    individual_results = self._process_windows_individually(uncached_windows, uncached_indices)
+                    all_patterns.extend(individual_results)
+            else:
+                # Fall back to individual processing
+                individual_results = self._process_windows_individually(uncached_windows, uncached_indices)
+                all_patterns.extend(individual_results)
+        
+        # Sort patterns by window index to maintain order
+        all_patterns.sort(key=lambda x: x['window_idx'])
+        
+        return {
+            'model': 'qwq-32b',
+            'segmentation_method': 'qwq_attention_heads',
+            'window_patterns': all_patterns,
+            'model_config': self.ollama_config,
+            'n_layers': self.ollama_config.get('n_layers', 32),
+            'n_heads': self.ollama_config.get('n_heads', 32),
+            'attention_architecture': 'multi_head_attention'
+        }
+    
+    def _get_cache_key(self, text: str) -> str:
+        """Generate a cache key for text content"""
+        import hashlib
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    
+    def _process_windows_individually(self, windows: List[str], indices: List[int]) -> List[Dict]:
+        """Process windows individually when batch processing is not available"""
+        results = []
+        
+        for window_idx, window in zip(indices, windows):
+            logger.info(f"Processing window {window_idx+1}/{len(windows)} ({len(window)} chars)")
             
             try:
+                # Validate text size before processing
+                if len(window) > 50000:  # 50K char limit
+                    logger.warning(f"Window {window_idx} too large ({len(window)} chars), chunking...")
+                    chunked_results = self._process_large_window(window, window_idx)
+                    results.extend(chunked_results)
+                    continue
+                
                 # Get QwQ attention patterns for this window
                 attention_patterns = self.ollama_extractor.get_attention_patterns(window)
                 
@@ -170,26 +262,67 @@ class EnhancedAttentionExtractor:
                     'model_info': self.ollama_config
                 }
                 
-                all_patterns.append(window_data)
+                # Cache the result
+                cache_key = self._get_cache_key(window)
+                self.attention_cache[cache_key] = window_data.copy()
+                
+                results.append(window_data)
                 logger.info(f"Window {window_idx} processed with QwQ attention")
                 
             except Exception as e:
                 logger.error(f"Error processing window {window_idx} with QwQ: {e}")
-                all_patterns.append({
+                results.append({
                     'window_idx': window_idx,
                     'text': window,
                     'error': str(e)
                 })
         
-        return {
-            'model': 'qwq-32b',
-            'segmentation_method': 'qwq_attention_heads',
-            'window_patterns': all_patterns,
-            'model_config': self.ollama_config,
-            'n_layers': self.ollama_config.get('n_layers', 32),
-            'n_heads': self.ollama_config.get('n_heads', 32),
-            'attention_architecture': 'multi_head_attention'
-        }
+        return results
+    
+    def _process_large_window(self, window: str, window_idx: int) -> List[Dict]:
+        """Process large windows by chunking them"""
+        logger.info(f"Chunking large window {window_idx}")
+        
+        # Simple chunking by character count
+        chunk_size = 25000  # 25K chars per chunk
+        chunks = []
+        for i in range(0, len(window), chunk_size):
+            chunk = window[i:i + chunk_size]
+            chunks.append(chunk)
+        
+        chunk_results = []
+        for i, chunk in enumerate(chunks):
+            try:
+                attention_patterns = self.ollama_extractor.get_attention_patterns(chunk)
+                boundary_scores = self.ollama_extractor.analyze_attention_for_boundaries(chunk)
+                boundaries = self.ollama_extractor.detect_best_boundaries(chunk, num_segments=3)
+                head_specializations = self._detect_qwq_head_specializations(attention_patterns)
+                
+                chunk_data = {
+                    'window_idx': f"{window_idx}_chunk_{i}",
+                    'text': chunk,
+                    'qwq_attention_patterns': attention_patterns,
+                    'boundary_scores': boundary_scores,
+                    'optimal_boundaries': boundaries,
+                    'head_specializations': head_specializations,
+                    'model_info': self.ollama_config,
+                    'is_chunk': True,
+                    'parent_window': window_idx
+                }
+                
+                chunk_results.append(chunk_data)
+                
+            except Exception as e:
+                logger.error(f"Error processing chunk {i} of window {window_idx}: {e}")
+                chunk_results.append({
+                    'window_idx': f"{window_idx}_chunk_{i}",
+                    'text': chunk,
+                    'error': str(e),
+                    'is_chunk': True,
+                    'parent_window': window_idx
+                })
+        
+        return chunk_results
         
     def analyze_qwq_attention_patterns(self, attention_data: Dict) -> Dict:
         """
