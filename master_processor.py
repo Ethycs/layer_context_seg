@@ -110,12 +110,16 @@ class FullMasterProcessor:
             from utils.llm_connection_pool import get_global_pool
             self.connection_pool = get_global_pool()
             
-            # Get pooled connections
+            # Get ollama connection first
             self.ollama_extractor = self.connection_pool.get_connection(
                 str(qwq_path), "ollama", device=self.device
             )
-            self.attention_extractor = self.connection_pool.get_connection(
-                str(qwq_path), "attention"
+            
+            # Create attention extractor that reuses the ollama instance
+            from models.attention_extractor import EnhancedAttentionExtractor
+            self.attention_extractor = EnhancedAttentionExtractor(
+                model_path=str(qwq_path),
+                ollama_extractor=self.ollama_extractor
             )
         else:
             logger.info("QwQ model not found, using default")
@@ -1800,17 +1804,14 @@ class FullMasterProcessor:
     def cleanup(self):
         """Cleanup resources including connection pool"""
         if self.connection_pool:
-            # Return connections to pool
+            # Return ollama connection to pool
             if self.ollama_extractor:
                 qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
                 self.connection_pool.return_connection(
                     self.ollama_extractor, str(qwq_path), "ollama"
                 )
-            if self.attention_extractor:
-                qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
-                self.connection_pool.return_connection(
-                    self.attention_extractor, str(qwq_path), "attention"
-                )
+            
+            # Note: attention_extractor is not pooled, it reuses ollama_extractor
             
             # Log pool statistics
             stats = self.connection_pool.get_stats()
