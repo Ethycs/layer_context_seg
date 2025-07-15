@@ -118,10 +118,12 @@ class FullMasterProcessor:
         )
         logger.info("Initialized core components for all pipelines.")
     
-    def process_text(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def process_text(self, text: str, rules: Optional[Dict[str, str]] = None, rich: bool = False, som: bool = False) -> Dict[str, Any]:
         """Process text using the configured mode"""
-        if self.mode == 'som-pipeline':
+        if som:
             return self._process_som_pipeline(text)
+        elif rich:
+            return self._process_rich_pipeline(text, rules)
         else: # Default to single-pass
             return self._process_single_pass(text, rules)
     
@@ -144,6 +146,51 @@ class FullMasterProcessor:
             'metadata': {
                 'model': 'QwQ-32B + MiniLM-L6-v2',
                 'architecture': 'Tape-Map-Path-Tape',
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+
+    def _process_rich_pipeline(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Process text using the rich pipeline, which includes multi-round
+        annotation and optional language guidance.
+        """
+        logger.info("Starting rich processing pipeline...")
+        if rules:
+            logger.info(f"Applying language guidance rules: {rules}")
+        
+        start_time = time.time()
+
+        # This pipeline will use the multi-round processing logic
+        logger.info("Phase 1: Partitioning text into segments...")
+        segment_contents = self.partitioner.create_partitions(text)
+        segments = [{'content': content} for content in segment_contents]
+        logger.info(f"Created {len(segments)} optimal segments.")
+
+        logger.info("Phase 2: Processing graph with multi-round annotations...")
+        graph_data = self.graph_processor.process(segments, multi_round=True)
+        logger.info(f"Processed graph with {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
+
+        logger.info("Phase 3: Reassembling document from graph...")
+        reassembled = self.graph_reassembler.reassemble(
+            graph_data['nodes'],
+            graph_data['edges'],
+            strategy="layered_assembly",
+            original_document=text
+        )
+        
+        processing_time = time.time() - start_time
+
+        return {
+            'mode': 'rich-pipeline',
+            'input_length': len(text),
+            'nodes': len(graph_data['nodes']),
+            'edges': len(graph_data['edges']),
+            'processing_time': processing_time,
+            'output': reassembled,
+            'metadata': {
+                'model': 'QwQ-32B',
+                'architecture': 'Tape-to-Graph-Rich',
                 'timestamp': datetime.now().isoformat()
             }
         }
@@ -306,10 +353,14 @@ def main():
     )
     
     parser.add_argument(
-        '--mode',
-        choices=['single-pass'],
-        default='single-pass',
-        help='Processing mode'
+        '--rich',
+        action='store_true',
+        help='Enable rich processing with multi-round annotation and language guidance.'
+    )
+    parser.add_argument(
+        '--som',
+        action='store_true',
+        help='Enable the Self-Organizing Map pipeline.'
     )
     
     parser.add_argument('--input', '-i', help='Input text file path')
@@ -319,7 +370,14 @@ def main():
     
     args = parser.parse_args()
     
-    config = get_config(mode=args.mode, model_type='ollama')
+    # Determine mode based on flags
+    if args.som:
+        mode = 'som-pipeline'
+    elif args.rich:
+        mode = 'rich'
+    else:
+        mode = 'single-pass'
+    config = get_config(mode=mode, model_type='ollama')
     
     if args.output:
         config['paths']['results_dir'] = Path(args.output)
@@ -341,23 +399,10 @@ def main():
         sys.exit(1)
     
     try:
-        # Pre-load the model once
-        logger.info("Pre-loading QwQ model...")
-        qwq_path = config['paths']['project_root'] / 'qwq.gguf'
-        if not qwq_path.exists():
-            raise FileNotFoundError(f"QwQ model not found at {qwq_path}")
-            
-        from utils.llm_connection_pool import get_global_pool
-        connection_pool = get_global_pool()
-        # Request the 'qwq' model type to get the unified QwQModel instance
-        qwq_model = connection_pool.get_connection(
-            str(qwq_path), "qwq", device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        )
-        
-        # Pass the pre-loaded model to the processor
-        processor = FullMasterProcessor(config, qwq_model=qwq_model)
-        logger.info(f"Starting {args.mode} processing with pre-loaded QwQ...")
-        results = processor.process_text(text)
+        # The model is now loaded directly by the FullMasterProcessor
+        processor = FullMasterProcessor(config)
+        logger.info(f"Starting {mode} processing with pre-loaded QwQ...")
+        results = processor.process_text(text, rich=args.rich, som=args.som)
         output_path = processor.save_results(results)
         
         print("\n" + "="*60)

@@ -5,3 +5,4 @@ recup_*/
 *.egg-info
 *.json
 *.txt
+dataset/

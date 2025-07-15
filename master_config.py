@@ -80,11 +80,8 @@ PROCESSING_MODES = {
     'single-pass': {
         'description': 'Fast single-pass processing with basic attention extraction',
     },
-    'multi-round': {
-        'description': 'Deep multi-round annotation with layered analysis',
-    },
-    'language-guided': {
-        'description': 'Natural language rule-guided processing',
+    'rich': {
+        'description': 'Rich processing with multi-round annotation and optional language guidance.',
     },
     'som-pipeline': {
         'description': 'Self-Organizing Map-based document generation',

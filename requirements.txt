@@ -23,3 +23,5 @@ pytest>=7.0.0
 jupyter>=1.0.0
 
 gguf
+llama_cpp_python/
+ipykernel
