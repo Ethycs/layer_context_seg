@@ -37,13 +37,12 @@ except ImportError:
 from models.context_window import ContextWindow
 from models.attention_extractor import EnhancedAttentionExtractor
 from models.instruction_seeder import InstructionSeeder
-from models.percolation_context_window import PercolationContextWindow
 from partitioning.partition_manager import PartitionManager
 from graph.graph_reassembler import GraphReassembler
 from graph.attention_graph_builder import AttentionGraphBuilder
 from graph.hierarchical_graph_builder import HierarchicalGraphBuilder
 from graph.knowledge_graph_manager import KnowledgeGraphManager
-from utils.performance_monitor import Timer, timed, gpu_memory_tracked, profile_memory
+from utils.performance_monitor import Timer, timed, gpu_memory_tracked
 
 # Try to import TorchSpectralProcessor for hybrid processing
 try:
@@ -65,7 +64,7 @@ logger = logging.getLogger(__name__)
 class FullMasterProcessor:
     """Full processor with all features including QwQ integration - Fixed for full text"""
     
-    def __init__(self, config: Dict[str, Any], graph_config: GraphConfig = None):
+    def __init__(self, config: Dict[str, Any], graph_config: GraphConfig = None, ollama_extractor=None):
         self.config = config
         self.mode = self.config['mode']
         self.model_type = self.config['model_type']
@@ -97,44 +96,31 @@ class FullMasterProcessor:
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
         
-        # Initialize components
-        self._initialize_components()
+        # Initialize components, using the pre-loaded model if provided
+        self._initialize_components(ollama_extractor)
     
     @gpu_memory_tracked
-    def _initialize_components(self):
+    def _initialize_components(self, ollama_extractor=None):
         """Initialize all processing components with QwQ"""
         logger.info(f"Initializing components for {self.mode} mode")
         
-        # Initialize QwQ-based attention extractor with connection pooling
-        qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
-        if qwq_path.exists():
-            logger.info(f"Using QwQ model at: {qwq_path}")
-            # Use connection pool for efficient LLM instance management
-            from utils.llm_connection_pool import get_global_pool
-            self.connection_pool = get_global_pool()
-            
-            # Get ollama connection first
-            self.ollama_extractor = self.connection_pool.get_connection(
-                str(qwq_path), "ollama", device=self.device
-            )
-            
-            # Create attention extractor that reuses the ollama instance
-            from models.attention_extractor import EnhancedAttentionExtractor
-            self.attention_extractor = EnhancedAttentionExtractor(
-                model_path=str(qwq_path),
-                ollama_extractor=self.ollama_extractor
-            )
-        else:
-            logger.info("QwQ model not found, using default")
-            self.ollama_extractor = None
-            self.attention_extractor = EnhancedAttentionExtractor()
-            self.connection_pool = None
+        self.ollama_extractor = ollama_extractor
+        if self.ollama_extractor is None:
+            logger.info("No pre-loaded model provided, initializing new one.")
+            qwq_path = self.config['paths']['project_root'] / 'qwq.gguf'
+            if qwq_path.exists():
+                from utils.llm_connection_pool import get_global_pool
+                self.connection_pool = get_global_pool()
+                self.ollama_extractor = self.connection_pool.get_connection(
+                    str(qwq_path), "ollama", device=self.device
+                )
+            else:
+                self.ollama_extractor = None
         
-        # Initialize percolation-based context window
-        default_window_size = 8192 if self.mode != 'conversation' else 2000
-        self.percolation_window = PercolationContextWindow(
-            size=self.processing_settings.get('window_size', default_window_size),
-            overlap_ratio=0.2
+        from models.attention_extractor import EnhancedAttentionExtractor
+        self.attention_extractor = EnhancedAttentionExtractor(
+            model_path=str(self.config['paths']['project_root'] / 'qwq.gguf'),
+            ollama_extractor=self.ollama_extractor
         )
         
         self.seeder = InstructionSeeder()
@@ -151,13 +137,10 @@ class FullMasterProcessor:
             attention_extractor=self.attention_extractor
         )
         
-        try:
-            from graph.enhanced_graph_reassembler import EnhancedGraphReassembler
-            self.graph_reassembler = EnhancedGraphReassembler()
-            logger.info("Using enhanced graph reassembler for rich reconstruction")
-        except ImportError:
-            self.graph_reassembler = GraphReassembler()
-            logger.info("Using standard graph reassembler")
+        self.condenser = GraphCondenser(self.ollama_extractor)
+        
+self.graph_reassembler = GraphReassembler()
+logger.info("Using unified graph reassembler with multiple strategies")
             
         self.hierarchical_builder = HierarchicalGraphBuilder()
     
@@ -165,65 +148,96 @@ class FullMasterProcessor:
         """Process text using the configured mode"""
         return self._process_single_pass(text, rules)
     
-    def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Architecturally correct single-pass processing."""
-        logger.info("Starting correct single-pass processing...")
-        start_time = datetime.now()
-
-        with Timer("Window Creation"):
-            windows = self.percolation_window.create_window(text)
-        logger.info(f"Created {len(windows)} windows.")
-
-        all_nodes = []
-        all_edges = []
-        node_offset = 0
-
-        with Timer("Batch Attention Extraction"):
-            batch_attention_data = self.attention_extractor.extract_attention_for_tape_splitting(windows)
+    def _hierarchical_partition(self, text: str) -> List[Dict[str, Any]]:
+        """Performs hierarchical, iterative segmentation of a text document."""
+        logger.info("Starting hierarchical partitioning...")
         
-        for i, (window_content, window_result) in enumerate(zip(windows, batch_attention_data['window_patterns'])):
-            logger.info(f"Processing window {i+1}/{len(windows)} results...")
-            
-            if 'error' in window_result:
-                logger.warning(f"Window {i} had error: {window_result['error']}, skipping.")
-                continue
-            
-            qwq_patterns = window_result.get('qwq_attention_patterns', {})
-            if not qwq_patterns:
-                logger.warning(f"No qwq_attention_patterns found for window {i}, skipping.")
-                continue
+        initial_segment = {'content': text, 'level': 0}
+        
+        segments = self._iterative_segmentation([initial_segment])
+        
+        logger.info(f"Hierarchical partitioning complete. Generated {len(segments)} segments.")
+        return segments
 
-            if self.torch_graph_builder:
-                attention_tensors = [torch.tensor(t, device=self.device) for t in qwq_patterns.values() if isinstance(t, (list, np.ndarray)) or torch.is_tensor(t)]
-                if not attention_tensors:
-                    logger.warning(f"No valid tensors in attention_patterns for window {i}, skipping.")
+    def _iterative_segmentation(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Implements iterative segmentation."""
+        config = {'max_rounds': 5, 'target_segment_size': 400, 'min_segment_size': 100, 'max_segment_size': 1200}
+        for i in range(config['max_rounds']):
+            logger.info(f"--- Partitioning Round {i+1}/{config['max_rounds']} ---")
+            
+            new_segments = []
+            for segment in segments:
+                if len(segment['content']) <= config['max_segment_size']:
+                    new_segments.append(segment)
                     continue
                 
-                attention_tensor = torch.stack(attention_tensors).mean(dim=0)
+                sub_segments = self._split_by_attention(segment)
+                new_segments.extend(sub_segments)
+            
+            if len(new_segments) == len(segments):
+                logger.info("Convergence reached.")
+                break
+            
+            segments = new_segments
+            
+        return segments
 
-                graph_output = self.torch_graph_builder.forward(
-                    attention_tensor=attention_tensor,
-                    text_segments=[window_content] 
-                )
+    def _split_by_attention(self, segment: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Uses attention to find semantic boundaries."""
+        content = segment['content']
+        logger.info(f"Applying attention-based splitting for segment of size {len(content)}")
+        try:
+            attention_results = self.attention_extractor.extract_attention_for_tape_splitting([content])
+            
+            if attention_results and attention_results.get('window_patterns'):
+                window_data = attention_results['window_patterns'][0]
+                boundaries = window_data.get('optimal_boundaries', [])
                 
-                window_nodes = graph_output.get('nodes', [])
-                window_edges = graph_output.get('edges', [])
+                if boundaries:
+                    logger.info(f"Found {len(boundaries)} optimal boundaries: {boundaries}")
+                    split_points = [0] + boundaries + [len(content)]
+                    sub_segments = []
+                    for i in range(len(split_points) - 1):
+                        start, end = split_points[i], split_points[i+1]
+                        sub_content = content[start:end]
+                        if sub_content.strip():
+                            sub_segments.append({'content': sub_content, 'level': segment['level'] + 1})
+                    return sub_segments
+        except Exception as e:
+            logger.error(f"Attention-based splitting failed: {e}. Falling back to simpler method.")
 
-                id_mapping = {}
-                for node in window_nodes:
-                    original_id = node['id']
-                    new_id = f"node_{node_offset + int(original_id.split('_')[-1])}"
-                    id_mapping[original_id] = new_id
-                    node['id'] = new_id
-                    node['source_window'] = i
-                
-                for edge in window_edges:
-                    edge['source'] = id_mapping.get(edge['source'], edge['source'])
-                    edge['target'] = id_mapping.get(edge['target'], edge['target'])
+        logger.info(f"Applying fallback splitting for segment of size {len(content)}")
+        midpoint = len(content) // 2
+        return [
+            {'content': content[:midpoint], 'level': segment['level'] + 1},
+            {'content': content[midpoint:], 'level': segment['level'] + 1},
+        ]
 
-                all_nodes.extend(window_nodes)
-                all_edges.extend(window_edges)
-                node_offset += len(window_nodes)
+    def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Architecturally correct single-pass processing using hierarchical partitioning."""
+        logger.info("Starting correct single-pass processing with Hierarchical Partitioner...")
+        start_time = datetime.now()
+
+        with Timer("Hierarchical Partitioning"):
+            segments = self._hierarchical_partition(text)
+        logger.info(f"Created {len(segments)} optimal segments.")
+
+        all_nodes = []
+        for i, segment in enumerate(segments):
+            all_nodes.append({
+                'id': f'node_{i}',
+                'content': segment['content'],
+                'level': segment['level']
+            })
+        
+        all_edges = []
+        for i in range(len(all_nodes) - 1):
+            all_edges.append({
+                'source': all_nodes[i]['id'],
+                'target': all_nodes[i+1]['id'],
+                'weight': 1.0,
+                'type': 'sequential'
+            })
 
         logger.info(f"Classifying {len(all_nodes)} nodes...")
         if all_nodes:
@@ -236,25 +250,42 @@ class FullMasterProcessor:
         else:
             classified_nodes = []
 
-        logger.info("Building final hierarchical graph...")
-        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(classified_nodes, all_edges)
+        logger.info("Condensing graph...")
+        if all_nodes:
+            # Assuming KnowledgeGraphManager is instantiated with the graph
+            kg_manager = KnowledgeGraphManager({"nodes": classified_nodes, "edges": all_edges})
+            
+            # We need an embedding model for condensation
+            embedding_model = None
+            try:
+                from sentence_transformers import SentenceTransformer
+                embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            except ImportError:
+                logger.warning("SentenceTransformers not installed, cannot condense text nodes.")
+
+            if embedding_model:
+                with Timer("Graph Condensation"):
+                    classified_nodes, all_edges = kg_manager.condense_graph(classified_nodes, all_edges, self.ollama_extractor, embedding_model)
         
-        logger.info("Reassembling document from graph...")
-        reassembled = self.graph_reassembler.reassemble_graph(hierarchical_nodes, tree_edges, text)
+        logger.info("Building final hierarchical graph...")
+        hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(condensed_nodes, condensed_edges)
+        
+logger.info("Reassembling document from graph...")
+# Example of using a specific strategy, e.g., 'layered_assembly'
+reassembled = self.graph_reassembler.reassemble(hierarchical_nodes, tree_edges, strategy="layered_assembly", original_document=text)
 
         processing_time = (datetime.now() - start_time).total_seconds()
 
         return {
-            'mode': 'direct-to-graph-single-pass',
+            'mode': 'hierarchical-single-pass',
             'input_length': len(text),
-            'windows': len(windows),
             'nodes': len(classified_nodes),
             'edges': len(all_edges),
             'processing_time': processing_time,
             'output': reassembled,
             'metadata': {
                 'model': 'QwQ-32B',
-                'architecture': 'Direct-to-Graph',
+                'architecture': 'Hierarchical-Direct-to-Graph',
                 'timestamp': datetime.now().isoformat()
             }
         }
@@ -407,8 +438,21 @@ def main():
         sys.exit(1)
     
     try:
-        processor = FullMasterProcessor(config)
-        logger.info(f"Starting {args.mode} processing with QwQ...")
+        # Pre-load the model once
+        logger.info("Pre-loading QwQ model...")
+        qwq_path = config['paths']['project_root'] / 'qwq.gguf'
+        if not qwq_path.exists():
+            raise FileNotFoundError(f"QwQ model not found at {qwq_path}")
+            
+        from utils.llm_connection_pool import get_global_pool
+        connection_pool = get_global_pool()
+        ollama_extractor = connection_pool.get_connection(
+            str(qwq_path), "ollama", device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        )
+        
+        # Pass the pre-loaded extractor to the processor
+        processor = FullMasterProcessor(config, ollama_extractor=ollama_extractor)
+        logger.info(f"Starting {args.mode} processing with pre-loaded QwQ...")
         results = processor.process_text(text)
         output_path = processor.save_results(results)
         
