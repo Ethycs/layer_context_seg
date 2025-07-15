@@ -129,6 +129,57 @@ class EnhancedAttentionExtractor:
             f"Download from: https://huggingface.co/Qwen/QwQ-32B-Preview-GGUF"
         )
         
+    def extract_attention_batch(self, windows: List[str]) -> List[Dict]:
+        """
+        Extract attention patterns for multiple windows in batch.
+        More efficient than extract_attention_for_tape_splitting.
+        
+        Args:
+            windows: List of context windows to analyze
+            
+        Returns:
+            List of dictionaries with attention analysis for each window
+        """
+        logger.info(f"Batch processing {len(windows)} windows with QwQ-32B")
+        
+        # Use batch processing from ollama extractor
+        if hasattr(self.ollama_extractor, 'get_attention_patterns_batch'):
+            try:
+                batch_results = self.ollama_extractor.get_attention_patterns_batch(windows)
+                
+                # Process results with head specialization detection
+                processed_results = []
+                for i, result in enumerate(batch_results):
+                    if 'error' not in result:
+                        head_specializations = self._detect_qwq_head_specializations(
+                            result.get('attention_patterns', {})
+                        )
+                        result['head_specializations'] = head_specializations
+                    processed_results.append(result)
+                
+                return processed_results
+                
+            except Exception as e:
+                logger.error(f"Batch extraction failed: {e}")
+                # Fall through to individual processing
+        
+        # Fallback to individual processing
+        results = []
+        for window in windows:
+            attention_patterns = self.ollama_extractor.get_attention_patterns(window)
+            boundary_scores = self.ollama_extractor.analyze_attention_for_boundaries(window)
+            boundaries = self.ollama_extractor.detect_best_boundaries(window, num_segments=5)
+            head_specializations = self._detect_qwq_head_specializations(attention_patterns)
+            
+            results.append({
+                'attention_patterns': attention_patterns,
+                'boundary_scores': boundary_scores,
+                'optimal_boundaries': boundaries,
+                'head_specializations': head_specializations
+            })
+        
+        return results
+    
     def extract_attention_for_tape_splitting(self, text_windows: List[str]) -> Dict:
         """
         Extract attention patterns from text windows using QwQ-32B model.

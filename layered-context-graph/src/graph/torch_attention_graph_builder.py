@@ -112,13 +112,28 @@ class TorchAttentionGraphBuilder(nn.Module):
             aggregation: How to aggregate ('mean', 'max', 'weighted')
             
         Returns:
-            Adjacency matrix
+            Adjacency matrix (2D)
         """
         # Move to device
         attention = attention_tensor.to(self.device)
         
+        # Log tensor shape for debugging
+        logger.debug(f"Attention tensor shape: {attention.shape}, dims: {attention.dim()}")
+        
         # Handle different shapes
-        if attention.dim() == 4:  # (layers, heads, seq, seq)
+        if attention.dim() == 5:  # (batch, layers, heads, seq, seq) or similar
+            # Aggregate over batch dimension first if present
+            if attention.shape[0] == 1:
+                # Single batch, squeeze it out
+                attention = attention.squeeze(0)
+                adjacency = self.attention_to_adjacency(attention, aggregation)
+            else:
+                # Multiple batches, average them
+                adjacency = attention.mean(dim=0)
+                adjacency = self.attention_to_adjacency(adjacency, aggregation)
+            return adjacency
+            
+        elif attention.dim() == 4:  # (layers, heads, seq, seq)
             if aggregation == 'weighted':
                 # Weight later layers more heavily
                 layer_weights = torch.linspace(0.3, 1.0, attention.shape[0], device=self.device)
@@ -127,10 +142,24 @@ class TorchAttentionGraphBuilder(nn.Module):
                 adjacency = weighted.sum(dim=0).mean(dim=0)
             else:
                 adjacency = attention.mean(dim=(0, 1))
+                
         elif attention.dim() == 3:  # (heads, seq, seq)
             adjacency = attention.mean(dim=0)
-        else:
+            
+        elif attention.dim() == 2:  # Already 2D
             adjacency = attention
+            
+        else:
+            logger.warning(f"Unexpected attention tensor dimensions: {attention.shape}")
+            # Try to reduce to 2D by averaging all but last 2 dimensions
+            while attention.dim() > 2:
+                attention = attention.mean(dim=0)
+            adjacency = attention
+        
+        # Ensure we have a 2D tensor
+        if adjacency.dim() != 2:
+            logger.error(f"Adjacency matrix has wrong dimensions: {adjacency.shape}")
+            raise ValueError(f"Expected 2D adjacency matrix, got {adjacency.dim()}D")
         
         # Make symmetric
         adjacency = (adjacency + adjacency.t()) / 2
@@ -218,33 +247,104 @@ class TorchAttentionGraphBuilder(nn.Module):
     
     def _create_edges_from_adjacency(self, 
                                     adjacency: torch.Tensor,
-                                    threshold: float = 0.75) -> List[Dict[str, Any]]:
+                                    threshold: float = 0.75,
+                                    use_sparse: bool = True,
+                                    top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Create edge list from adjacency matrix.
+        Create edge list from adjacency matrix with sparse optimization.
+        
+        Args:
+            adjacency: Adjacency matrix
+            threshold: Minimum weight threshold
+            use_sparse: Use sparse operations for large graphs
+            top_k: Keep only top-k edges per node
         """
         edges = []
+        n_nodes = adjacency.shape[0]
         
-        # Get indices where adjacency > threshold
-        indices = torch.nonzero(adjacency > threshold, as_tuple=False)
+        # Auto-enable pruning for large graphs
+        if n_nodes > 100 and top_k is None:
+            top_k = min(20, n_nodes // 5)
+            logger.info(f"Large graph ({n_nodes} nodes), keeping top {top_k} edges per node")
         
-        for idx in indices:
-            i, j = idx[0].item(), idx[1].item()
+        # Apply top-k pruning if requested
+        if top_k is not None:
+            # Keep top-k connections per node
+            topk_values, topk_indices = torch.topk(adjacency, min(top_k, n_nodes), dim=1)
             
-            # Skip self-loops
-            if i == j:
-                continue
+            # Create sparse adjacency with only top-k edges
+            sparse_adj = torch.zeros_like(adjacency)
+            for i in range(n_nodes):
+                sparse_adj[i, topk_indices[i]] = topk_values[i]
             
-            # Create edge
-            edge = {
-                'source': f'node_{i}',
-                'target': f'node_{j}',
-                'weight': float(adjacency[i, j]),
-                'source_idx': i,
-                'target_idx': j
-            }
-            
-            edges.append(edge)
+            # Make symmetric by taking max
+            adjacency = torch.max(sparse_adj, sparse_adj.t())
         
+        # Apply threshold
+        if use_sparse and n_nodes > 50:
+            # Use sparse operations for efficiency
+            mask = adjacency > threshold
+            
+            # Remove self-loops
+            mask.fill_diagonal_(False)
+            
+            # Get indices efficiently
+            indices = mask.nonzero(as_tuple=False)
+            
+            # Create edges (avoid duplicates by only taking upper triangle)
+            seen = set()
+            for idx in indices:
+                i, j = idx[0].item(), idx[1].item()
+                
+                # Create canonical edge (smaller index first)
+                edge_key = (min(i, j), max(i, j))
+                if edge_key not in seen:
+                    seen.add(edge_key)
+                    
+                    edge = {
+                        'source': f'node_{i}',
+                        'target': f'node_{j}',
+                        'weight': float(adjacency[i, j]),
+                        'source_idx': i,
+                        'target_idx': j
+                    }
+                    edges.append(edge)
+        else:
+            # Original implementation for small graphs
+            indices = torch.nonzero(adjacency > threshold, as_tuple=False)
+            
+            for idx in indices:
+                i, j = idx[0].item(), idx[1].item()
+                
+                # Skip self-loops and duplicates
+                if i >= j:
+                    continue
+                
+                edge = {
+                    'source': f'node_{i}',
+                    'target': f'node_{j}',
+                    'weight': float(adjacency[i, j]),
+                    'source_idx': i,
+                    'target_idx': j
+                }
+                edges.append(edge)
+        
+        # Add edge type classification for important edges
+        if len(edges) > 0:
+            # Sort by weight and mark top edges
+            edges.sort(key=lambda e: e['weight'], reverse=True)
+            
+            # Mark top 10% as strong connections
+            num_strong = max(1, len(edges) // 10)
+            for i, edge in enumerate(edges):
+                if i < num_strong:
+                    edge['connection_strength'] = 'strong'
+                elif i < len(edges) // 3:
+                    edge['connection_strength'] = 'medium'
+                else:
+                    edge['connection_strength'] = 'weak'
+        
+        logger.info(f"Created {len(edges)} edges from {n_nodes}x{n_nodes} adjacency matrix")
         return edges
     
     def build_conversation_graph(self,

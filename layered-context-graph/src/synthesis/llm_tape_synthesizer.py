@@ -129,6 +129,47 @@ class LLMTapeSynthesizer:
             context_parts.append(f"- {edge_type}: {count} connections")
         
         return '\n'.join(context_parts)
+
+    def classify_edge_relationship(self, node1_content: str, node2_content: str) -> str:
+        """
+        Use the LLM to classify the semantic relationship between two nodes.
+        """
+        prompt = f"""Analyze the relationship between the following two text segments.
+
+Segment 1:
+---
+{node1_content[:1000]}...
+---
+
+Segment 2:
+---
+{node2_content[:1000]}...
+---
+
+What is the primary relationship between Segment 2 and Segment 1? Choose from the following options:
+- "explains": Segment 2 explains or clarifies a concept from Segment 1.
+- "elaborates": Segment 2 provides more detail or builds upon an idea from Segment 1.
+- "contradicts": Segment 2 presents an opposing view or contradicts Segment 1.
+- "is_example_of": Segment 2 provides a specific example of a concept in Segment 1.
+- "is_consequence_of": Segment 2 is a result or consequence of what is described in Segment 1.
+- "depends_on": Segment 2 requires the information from Segment 1 as a prerequisite.
+- "no_clear_relation": There is no direct, clear relationship.
+
+Return only the single relationship type as a string (e.g., "explains").
+"""
+        
+        if self.llm and hasattr(self.llm, 'generate_text'):
+            try:
+                response = self.llm.generate_text(prompt, max_length=20).strip().lower()
+                # Basic validation
+                valid_types = ["explains", "elaborates", "contradicts", "is_example_of", "is_consequence_of", "depends_on", "no_clear_relation"]
+                if response in valid_types:
+                    return response
+                return "unknown"
+            except Exception as e:
+                logger.warning(f"Edge classification failed: {e}")
+                return "unknown"
+        return "unknown"
     
     def _synthesize_with_llm(self, prompt: str, max_length: int = 2000) -> str:
         """Use LLM to generate synthesized content"""

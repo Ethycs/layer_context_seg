@@ -287,6 +287,17 @@ class OllamaModelExtractor:
         return state_dict
         
     def get_attention_patterns(self, text: str) -> Dict[int, torch.Tensor]:
+        # Import performance monitoring if available
+        try:
+            from utils.performance_monitor import timed
+            @timed(name="get_attention_patterns", category="llm_calls", log_result=False)
+            def _get_attention_patterns_timed(self, text):
+                return self._get_attention_patterns_impl(text)
+            return _get_attention_patterns_timed(self, text)
+        except ImportError:
+            return self._get_attention_patterns_impl(text)
+    
+    def _get_attention_patterns_impl(self, text: str) -> Dict[int, torch.Tensor]:
         """
         Get attention patterns for all layers when processing the given text
         
@@ -298,10 +309,37 @@ class OllamaModelExtractor:
         """
         logger.info(f"Getting attention patterns for text ({len(text)} chars)")
         
-        # For now, skip real attention extraction as GGUF contains quantized weights
-        # that need proper dequantization which is not yet implemented
+        # Try to use real attention extraction if available
+        try:
+            # Import the real attention extractor
+            from models.gguf_attention_extractor import GGUFAttentionExtractor
+            
+            # Check if we can use the real extractor
+            if hasattr(self, '_real_extractor'):
+                extractor = self._real_extractor
+            else:
+                # Initialize real extractor
+                logger.info("Initializing real GGUF attention extractor...")
+                extractor = GGUFAttentionExtractor(self.model_path, device=str(self.device))
+                self._real_extractor = extractor
+            
+            # Extract real attention patterns
+            patterns = extractor.extract_attention_patterns(text)
+            
+            if patterns:
+                logger.info(f"Extracted {len(patterns)} real attention patterns from model")
+                return patterns
+            else:
+                logger.warning("Real extraction returned empty patterns, falling back to synthetic")
+                
+        except Exception as e:
+            logger.warning(f"Real attention extraction failed: {e}, falling back to synthetic patterns")
         
-        # Create synthetic attention patterns with more realistic structure
+        # Fallback to synthetic patterns if real extraction fails
+        return self._generate_synthetic_attention_patterns(text)
+    
+    def _generate_synthetic_attention_patterns(self, text: str) -> Dict[int, torch.Tensor]:
+        """Generate synthetic attention patterns as fallback."""
         n_layers = min(self.layer_count, 4)  # Use fewer layers for testing
         patterns = {}
         
@@ -318,7 +356,7 @@ class OllamaModelExtractor:
         
         n_heads = self.attention_heads
         
-        logger.info(f"Creating attention patterns for {n_layers} layers, {seq_len} tokens, {n_heads} heads")
+        logger.info(f"Creating synthetic attention patterns for {n_layers} layers, {seq_len} tokens, {n_heads} heads")
         
         for layer_idx in range(n_layers):
             # Create structured attention pattern on device
@@ -362,7 +400,7 @@ class OllamaModelExtractor:
             
             patterns[layer_idx] = attention_matrix
             
-        logger.info(f"Generated {len(patterns)} structured attention pattern matrices")
+        logger.info(f"Generated {len(patterns)} synthetic attention pattern matrices")
         return patterns
     
     def get_attention_patterns_batch(self, texts: List[str]) -> List[Dict]:
@@ -377,9 +415,48 @@ class OllamaModelExtractor:
         """
         logger.info(f"Getting attention patterns for {len(texts)} texts in batch")
         
-        batch_results = []
+        # Try to use real batch extraction if available
+        try:
+            # Import the real attention extractor
+            from models.gguf_attention_extractor import GGUFAttentionExtractor
+            
+            # Initialize real extractor if needed
+            if not hasattr(self, '_real_extractor'):
+                logger.info("Initializing real GGUF attention extractor for batch processing...")
+                self._real_extractor = GGUFAttentionExtractor(self.model_path, device=str(self.device))
+            
+            # Process all texts in parallel using PyTorch batching
+            batch_results = []
+            batch_size = 8  # Larger batch size for GPU efficiency
+            
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i + batch_size]
+                
+                # Extract patterns for batch
+                batch_patterns = []
+                for text in batch_texts:
+                    patterns = self._real_extractor.extract_attention_patterns(text)
+                    batch_patterns.append(patterns)
+                
+                # Analyze boundaries in parallel
+                for text, patterns in zip(batch_texts, batch_patterns):
+                    boundary_scores = self._analyze_attention_for_boundaries_fast(patterns, text)
+                    boundaries = self._detect_best_boundaries_fast(boundary_scores, num_segments=5)
+                    
+                    batch_results.append({
+                        'attention_patterns': patterns,
+                        'boundary_scores': boundary_scores,
+                        'optimal_boundaries': boundaries
+                    })
+            
+            logger.info(f"Real batch processing complete for {len(batch_results)} texts")
+            return batch_results
+            
+        except Exception as e:
+            logger.warning(f"Real batch extraction failed: {e}, falling back to synthetic")
         
-        # Process in smaller batches to avoid memory issues
+        # Fallback to original processing
+        batch_results = []
         batch_size = 4  # Process 4 texts at a time
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
@@ -410,6 +487,44 @@ class OllamaModelExtractor:
         
         logger.info(f"Batch processing complete for {len(batch_results)} texts")
         return batch_results
+    
+    def _analyze_attention_for_boundaries_fast(self, patterns: Dict[int, torch.Tensor], text: str) -> List[float]:
+        """Fast boundary analysis using pre-computed attention patterns."""
+        if not patterns:
+            return []
+        
+        tokens = text.split()
+        boundary_scores = torch.zeros(len(tokens) - 1, device=self.device)
+        
+        # Vectorized boundary detection
+        for layer_idx, attention in patterns.items():
+            if attention.shape[-1] >= len(tokens):
+                # Compute attention discontinuity in parallel
+                for pos in range(min(len(tokens) - 1, attention.shape[-1] - 1)):
+                    # Use slicing for efficient computation
+                    before_attn = attention[:, :pos+1, :pos+1].mean()
+                    after_attn = attention[:, pos+1:, pos+1:].mean()
+                    boundary_scores[pos] += abs(before_attn - after_attn)
+        
+        # Normalize
+        if boundary_scores.max() > 0:
+            boundary_scores = boundary_scores / boundary_scores.max()
+        
+        return boundary_scores.cpu().tolist()
+    
+    def _detect_best_boundaries_fast(self, boundary_scores: List[float], num_segments: int = 5) -> List[int]:
+        """Fast boundary detection using torch operations."""
+        if not boundary_scores or num_segments <= 1:
+            return []
+        
+        # Convert to tensor for faster operations
+        scores_tensor = torch.tensor(boundary_scores, device=self.device)
+        
+        # Get top k boundaries
+        num_boundaries = min(num_segments - 1, len(boundary_scores))
+        _, top_indices = torch.topk(scores_tensor, num_boundaries)
+        
+        return sorted(top_indices.cpu().tolist())
         
     def analyze_attention_for_boundaries(self, text: str) -> List[float]:
         """

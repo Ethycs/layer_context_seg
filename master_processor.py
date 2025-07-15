@@ -299,34 +299,87 @@ class FullMasterProcessor:
         """Architecturally correct single-pass processing."""
         logger.info("Starting correct single-pass processing...")
         start_time = datetime.now()
+        
+        # Import performance monitoring
+        try:
+            from utils.performance_monitor import Timer, timed, gpu_memory_tracked, profile_memory
+            self._performance_enabled = True
+        except ImportError:
+            self._performance_enabled = False
+            logger.debug("Performance monitoring not available")
 
         # Step 1: Create overlapping windows to work with
         logger.info("Creating percolation windows...")
-        windows = self.percolation_window.create_window(text)
+        if self._performance_enabled:
+            with Timer("Window Creation"):
+                windows = self.percolation_window.create_window(text)
+        else:
+            windows = self.percolation_window.create_window(text)
         logger.info(f"Created {len(windows)} windows.")
 
         all_nodes = []
         all_edges = []
         node_offset = 0
 
-        # Step 2: Process each window individually to generate nodes
-        for i, window_content in enumerate(windows):
-            logger.info(f"Processing window {i+1}/{len(windows)}...")
+        # Step 2: Batch process all windows for efficiency
+        if self._performance_enabled:
+            logger.info(f"Batch processing {len(windows)} windows with attention extraction...")
             
-            # Extract attention for the current window
-            attention_data = self.attention_extractor.extract_attention_for_tape_splitting([window_content])
+            # Log initial memory state
+            mem_stats = profile_memory()
+            logger.info(f"Initial memory - CPU: {mem_stats.get('cpu_memory_mb', 0):.1f}MB, GPU: {mem_stats.get('gpu_memory_allocated_mb', 0):.1f}MB")
             
-            if not attention_data.get('attention_patterns'):
+            with Timer("Batch Attention Extraction"):
+                # Use batch extraction method
+                batch_attention_data = self.attention_extractor.extract_attention_batch(windows)
+        else:
+            # Use batch extraction without timing
+            batch_attention_data = self.attention_extractor.extract_attention_batch(windows)
+        
+        # Process batch results
+        for i, (window_content, window_result) in enumerate(zip(windows, batch_attention_data)):
+            logger.info(f"Processing window {i+1}/{len(windows)} results...")
+            
+            # Check if this window has valid results
+            if 'error' in window_result:
+                logger.warning(f"Window {i} had error: {window_result['error']}, skipping.")
+                continue
+            
+            # Get attention patterns from batch result
+            attention_patterns = window_result.get('attention_patterns', {})
+            if not attention_patterns:
                 logger.warning(f"No attention patterns found for window {i}, skipping.")
                 continue
 
             # Use TorchAttentionGraphBuilder to get semantic nodes and edges for this window
-            if self.torch_graph_builder:
-                # The builder expects a tensor, so we create a dummy one if needed
-                # This part needs to be robust based on actual attention_extractor output
-                attention_tensor = attention_data['attention_patterns']
-                if not isinstance(attention_tensor, torch.Tensor):
-                    attention_tensor = torch.tensor(attention_tensor, device=self.device)
+            if self.torch_graph_builder and attention_patterns:
+                # Convert attention patterns to tensor format
+                # attention_patterns is a dict mapping layer_idx to attention tensors
+                if isinstance(attention_patterns, dict) and len(attention_patterns) > 0:
+                    # Stack attention from different layers
+                    attention_tensors = []
+                    for layer_idx in sorted(attention_patterns.keys()):
+                        layer_attention = attention_patterns[layer_idx]
+                        # Ensure we have a tensor
+                        if not isinstance(layer_attention, torch.Tensor):
+                            layer_attention = torch.tensor(layer_attention)
+                        attention_tensors.append(layer_attention)
+                    
+                    # Create unified attention tensor
+                    if attention_tensors:
+                        # Check dimensions of first tensor
+                        first_shape = attention_tensors[0].shape
+                        logger.debug(f"First attention tensor shape: {first_shape}")
+                        
+                        # Stack along layer dimension
+                        attention_tensor = torch.stack(attention_tensors, dim=0)
+                        logger.debug(f"Stacked attention tensor shape: {attention_tensor.shape}")
+                    else:
+                        logger.warning(f"No valid attention tensors for window {i}")
+                        continue
+                else:
+                    logger.warning(f"Invalid attention pattern format for window {i}")
+                    continue
                 
                 # The builder works on segments, for now, we treat the whole window as one segment
                 # to let the builder's internal clustering find the nodes.
@@ -364,6 +417,11 @@ class FullMasterProcessor:
             graph_for_classification = {"nodes": all_nodes, "edges": all_edges}
             kg_manager = KnowledgeGraphManager(graph_for_classification)
             classified_nodes = kg_manager.classify_nodes()
+            
+            # Step 4.5: Classify Edge Relationships
+            logger.info(f"Classifying relationships for {len(all_edges)} edges...")
+            all_edges = self._classify_edge_relationships(classified_nodes, all_edges)
+
         else:
             classified_nodes = []
 
@@ -390,6 +448,40 @@ class FullMasterProcessor:
                 'timestamp': datetime.now().isoformat()
             }
         }
+
+    def _classify_edge_relationships(self, nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
+        """Use LLM to classify the relationship type for important edges."""
+        if not self.ollama_extractor:
+            logger.warning("LLM extractor not available, skipping edge classification.")
+            return edges
+
+        node_map = {node['id']: node for node in nodes}
+        
+        # Only classify edges between important nodes to save resources
+        important_nodes = {n['id'] for n in nodes if n.get('classification') in ['KEEP', 'TRACK']}
+        
+        for edge in edges:
+            source_id = edge.get('source')
+            target_id = edge.get('target')
+
+            if source_id in important_nodes and target_id in important_nodes:
+                source_node = node_map.get(source_id)
+                target_node = node_map.get(target_id)
+
+                if source_node and target_node:
+                    # Lazy load synthesizer if not already available
+                    if not hasattr(self, 'llm_synthesizer'):
+                        from synthesis.llm_tape_synthesizer import LLMTapeSynthesizer
+                        self.llm_synthesizer = LLMTapeSynthesizer(self.config['paths']['project_root'] / 'qwq.gguf')
+
+                    relationship = self.llm_synthesizer.classify_edge_relationship(
+                        source_node['content'],
+                        target_node['content']
+                    )
+                    edge['type'] = relationship
+                    edge['classified'] = True
+        
+        return edges
     
     def _classify_segment_type(self, content: str) -> str:
         """Classify segment for reconstruction purposes"""

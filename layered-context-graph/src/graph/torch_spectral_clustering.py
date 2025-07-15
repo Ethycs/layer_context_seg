@@ -59,8 +59,11 @@ class TorchSpectralClustering(nn.Module):
                 - cluster_assignments: Tensor of cluster IDs for each node
                 - metadata: Dict containing eigenvectors, eigenvalues, etc.
         """
-        # Move to correct device
-        A = adjacency_matrix.to(self.device)
+        # Move to correct device if not already there
+        if adjacency_matrix.device != self.device:
+            A = adjacency_matrix.to(self.device)
+        else:
+            A = adjacency_matrix
         
         # Ensure symmetry (average with transpose)
         A = (A + A.t()) / 2
@@ -68,24 +71,30 @@ class TorchSpectralClustering(nn.Module):
         # Compute Laplacian
         L = self._compute_laplacian(A)
         
-        # Compute eigenvectors and eigenvalues
-        eigenvalues, eigenvectors = torch.linalg.eigh(L)
-        
-        # For spectral clustering, we use the first k eigenvectors
-        # corresponding to the k smallest eigenvalues
-        k_eigenvectors = eigenvectors[:, :num_clusters]
+        # Performance optimization for large matrices
+        if A.shape[0] > 1000:
+            logger.info(f"Large matrix ({A.shape[0]}x{A.shape[0]}), using approximate methods")
+            # Use Lanczos algorithm for large matrices (faster)
+            eigenvalues, eigenvectors = torch.linalg.eigvalsh(L, eigvals=(0, min(num_clusters + 1, A.shape[0] - 1)))
+            k_eigenvectors = eigenvectors[:, :num_clusters]
+        else:
+            # Compute all eigenvectors for small matrices
+            eigenvalues, eigenvectors = torch.linalg.eigh(L)
+            k_eigenvectors = eigenvectors[:, :num_clusters]
         
         # Normalize rows for k-means (optional but recommended)
         k_eigenvectors_normalized = F.normalize(k_eigenvectors, p=2, dim=1)
         
         # Simple k-means clustering in spectral space
         # For differentiability, we use soft assignments
-        cluster_assignments = self._soft_kmeans(k_eigenvectors_normalized, num_clusters)
+        # Reduce iterations for large graphs
+        num_iterations = 50 if A.shape[0] > 500 else 100
+        cluster_assignments = self._soft_kmeans(k_eigenvectors_normalized, num_clusters, num_iterations)
         
         metadata = {
-            'eigenvalues': eigenvalues,
-            'eigenvectors': eigenvectors,
-            'laplacian': L,
+            'eigenvalues': eigenvalues[:num_clusters],  # Only store what we need
+            'eigenvectors': k_eigenvectors,  # Only store k eigenvectors
+            'laplacian': L if A.shape[0] < 100 else None,  # Don't store large matrices
             'fiedler_vector': eigenvectors[:, 1] if eigenvectors.shape[1] > 1 else None
         }
         
@@ -117,7 +126,7 @@ class TorchSpectralClustering(nn.Module):
     def _soft_kmeans(self, X: torch.Tensor, k: int, 
                      num_iterations: int = 100) -> torch.Tensor:
         """
-        Differentiable soft k-means clustering.
+        Differentiable soft k-means clustering with memory optimization.
         
         Args:
             X: Data points to cluster (N x D)
@@ -128,6 +137,16 @@ class TorchSpectralClustering(nn.Module):
             Soft cluster assignments (N x k)
         """
         N, D = X.shape
+        
+        # Check GPU memory for large datasets
+        if self.device.type == 'cuda' and N > 10000:
+            # Estimate memory usage
+            mem_required = N * k * 4 * 2  # float32, distances and assignments
+            mem_available = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            
+            if mem_required > mem_available * 0.8:  # Use only 80% of available memory
+                logger.warning(f"Large dataset ({N} points), using mini-batch k-means")
+                return self._minibatch_soft_kmeans(X, k, num_iterations)
         
         # Initialize centroids using k-means++
         centroids = self._initialize_centroids_plusplus(X, k)
@@ -142,6 +161,45 @@ class TorchSpectralClustering(nn.Module):
             # Update centroids
             centroids = soft_assignments.t() @ X
             centroids = centroids / (soft_assignments.sum(dim=0, keepdim=True).t() + self.epsilon)
+        
+        return soft_assignments
+    
+    def _minibatch_soft_kmeans(self, X: torch.Tensor, k: int, 
+                               num_iterations: int = 100, 
+                               batch_size: int = 1024) -> torch.Tensor:
+        """
+        Mini-batch version of soft k-means for memory efficiency.
+        """
+        N, D = X.shape
+        
+        # Initialize centroids
+        centroids = self._initialize_centroids_plusplus(X, k)
+        
+        # Process in batches
+        soft_assignments = torch.zeros((N, k), device=self.device)
+        
+        for _ in range(num_iterations):
+            # Reset accumulator for centroids
+            new_centroids = torch.zeros_like(centroids)
+            total_weights = torch.zeros(k, device=self.device)
+            
+            # Process each batch
+            for i in range(0, N, batch_size):
+                batch = X[i:min(i + batch_size, N)]
+                
+                # Compute distances for this batch
+                distances = torch.cdist(batch, centroids)
+                batch_assignments = F.softmax(-distances, dim=1)
+                
+                # Store assignments
+                soft_assignments[i:min(i + batch_size, N)] = batch_assignments
+                
+                # Accumulate for centroid update
+                new_centroids += batch_assignments.t() @ batch
+                total_weights += batch_assignments.sum(dim=0)
+            
+            # Update centroids
+            centroids = new_centroids / (total_weights.unsqueeze(1) + self.epsilon)
         
         return soft_assignments
     
