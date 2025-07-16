@@ -6,3 +6,5 @@ recup_*/
 *.json
 *.txt
 dataset/
+data/
+*.safetensors

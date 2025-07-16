@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 class LLMTapeSynthesizer:
     """Synthesizes new documents from knowledge graphs using LLMs"""
     
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: Optional[str] = None, qwq_model: Optional[Any] = None):
         self.model_path = model_path
+        self.qwq_model = qwq_model
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Initialize LLM for synthesis
@@ -34,17 +35,18 @@ class LLMTapeSynthesizer:
         }
     
     def _initialize_llm(self):
-        """Initialize the LLM for synthesis"""
+        """Initialize the LLM for synthesis, preferring the shared instance."""
         try:
-            # Try to use QwQ if available
-            if self.model_path and Path(self.model_path).exists():
-                from models.ollama_extractor import OllamaModelExtractor
-                self.llm = OllamaModelExtractor(self.model_path, device=self.device)
-                logger.info(f"Using QwQ model for synthesis: {self.model_path}")
+            if self.qwq_model:
+                self.llm = self.qwq_model
+                logger.info("Using shared QwQ model for synthesis.")
+            elif self.model_path and Path(self.model_path).exists():
+                from models.qwq_model import QwQModel
+                logger.warning("Creating a new QwQModel instance in LLMTapeSynthesizer. This may consume extra memory.")
+                self.llm = QwQModel(self.model_path, device=self.device)
             else:
-                # Fallback to a simple prompt-based approach
                 self.llm = None
-                logger.info("No LLM model found, using template-based synthesis")
+                logger.info("No LLM model provided or found, using template-based synthesis.")
         except Exception as e:
             logger.warning(f"Could not initialize LLM: {e}")
             self.llm = None
@@ -158,25 +160,33 @@ What is the primary relationship between Segment 2 and Segment 1? Choose from th
 Return only the single relationship type as a string (e.g., "explains").
 """
         
-        if self.llm and hasattr(self.llm, 'generate_text'):
+        if self.llm and hasattr(self.llm, 'classify_relationship'):
             try:
-                response = self.llm.generate_text(prompt, max_length=20).strip().lower()
+                # Use the model's dedicated classification method if it exists
+                return self.llm.classify_relationship(node1_content, node2_content)
+            except Exception as e:
+                logger.warning(f"Edge classification with dedicated method failed: {e}")
+        
+        # Fallback to generic prompt generation
+        if self.llm and hasattr(self.llm, 'generate'):
+             try:
+                response = self.llm.generate(prompt, max_tokens=20)
                 # Basic validation
                 valid_types = ["explains", "elaborates", "contradicts", "is_example_of", "is_consequence_of", "depends_on", "no_clear_relation"]
                 if response in valid_types:
                     return response
                 return "unknown"
-            except Exception as e:
-                logger.warning(f"Edge classification failed: {e}")
+             except Exception as e:
+                logger.warning(f"Edge classification with generate method failed: {e}")
                 return "unknown"
         return "unknown"
     
     def _synthesize_with_llm(self, prompt: str, max_length: int = 2000) -> str:
         """Use LLM to generate synthesized content"""
-        if self.llm and hasattr(self.llm, 'generate_text'):
+        if self.llm and hasattr(self.llm, 'generate'):
             # Use the actual LLM
             try:
-                response = self.llm.generate_text(prompt, max_length=max_length)
+                response = self.llm.generate(prompt, max_tokens=max_length)
                 return response
             except Exception as e:
                 logger.warning(f"LLM generation failed: {e}")

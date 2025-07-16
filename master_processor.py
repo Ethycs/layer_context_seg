@@ -97,8 +97,7 @@ class FullMasterProcessor:
         
         # The EnhancedAttentionExtractor will now use the unified model
         self.attention_extractor = EnhancedAttentionExtractor(
-            model_path=str(self.config['model_config']['gguf_path']),
-            ollama_extractor=self.qwq_model # Pass the unified model
+            qwq_model=self.qwq_model # Pass the unified model
         )
         
         self.seeder = InstructionSeeder()
@@ -261,7 +260,8 @@ class FullMasterProcessor:
                 if source_node and target_node:
                     if not hasattr(self, 'llm_synthesizer'):
                         from synthesis.llm_tape_synthesizer import LLMTapeSynthesizer
-                        self.llm_synthesizer = LLMTapeSynthesizer(self.config['paths']['project_root'] / 'qwq.gguf')
+                        # Pass the single, shared QwQ model instance
+                        self.llm_synthesizer = LLMTapeSynthesizer(qwq_model=self.qwq_model)
 
                     relationship = self.llm_synthesizer.classify_edge_relationship(
                         source_node['content'],
@@ -363,10 +363,8 @@ def main():
         help='Enable the Self-Organizing Map pipeline.'
     )
     
-    parser.add_argument('--input', '-i', help='Input text file path')
+    parser.add_argument('--input', '-i', required=True, help='Input text file path')
     parser.add_argument('--output', '-o', help='Output directory')
-    parser.add_argument('--demo', choices=list(DEMO_CONFIGS.keys()) + ['layered_context_file'],
-                       help='Use demo content')
     
     args = parser.parse_args()
     
@@ -382,21 +380,13 @@ def main():
     if args.output:
         config['paths']['results_dir'] = Path(args.output)
     
-    from load_demo_content import get_demo_content
-    if args.demo:
-        text = get_demo_content(args.demo)
-        logger.info(f"Using demo content: {args.demo}")
-    elif args.input:
-        input_path = Path(args.input)
-        if not input_path.exists():
-            logger.error(f"Input file not found: {input_path}")
-            sys.exit(1)
-        with open(input_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-        logger.info(f"Loaded input file: {input_path} ({len(text)} characters)")
-    else:
-        logger.error("Either --input or --demo must be specified")
+    input_path = Path(args.input)
+    if not input_path.exists():
+        logger.error(f"Input file not found: {input_path}")
         sys.exit(1)
+    with open(input_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    logger.info(f"Loaded input file: {input_path} ({len(text)} characters)")
     
     try:
         # The model is now loaded directly by the FullMasterProcessor

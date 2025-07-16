@@ -25,3 +25,4 @@ jupyter>=1.0.0
 gguf
 llama_cpp_python/
 ipykernel
+h5py
