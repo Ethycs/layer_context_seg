@@ -29,14 +29,12 @@ sys.path.insert(0, str(src_path))
 from master_config import get_config, get_rule_set, DEMO_CONFIGS, RULE_SETS, GraphConfig
 
 # Import core modules
-from models.context_window import ContextWindow
 from models.attention_extractor import EnhancedAttentionExtractor
-from models.instruction_seeder import InstructionSeeder
 from partitioning.partition_manager import PartitionManager
 from graph.graph_reassembler import GraphReassembler
 from graph.processor import GraphProcessor
-from synthesis.som_generator import SOM_DocumentGenerator
 from models.qwq_model import QwQModel
+from rich_pipeline import run_rich_pipeline
 
 # Try to import TorchSpectralProcessor for hybrid processing
 try:
@@ -56,221 +54,52 @@ logger = logging.getLogger(__name__)
 
 
 class FullMasterProcessor:
-    """Full processor with all features including QwQ integration - Fixed for full text"""
+    """A simplified processor that runs the single, unified rich pipeline."""
     
-    def __init__(self, config: Dict[str, Any], graph_config: GraphConfig = None, qwq_model=None):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.mode = self.config['mode']
-        self.model_type = self.config['model_type']
-        self.model_config = self.config['model_config']
-        self.processing_settings = self.config['processing_settings']
         self.output_dir = self.config['paths']['results_dir']
-        
-        # The graph_config is now part of the main config
-        self.graph_config = self.config.get('graph_config', GraphConfig())
-            
-        # Set up GPU device
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"Using device: {self.device}")
-        if torch.cuda.is_available():
-            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         
-        # Ensure output directory exists
+        logger.info(f"Using device: {self.device}")
         self.output_dir.mkdir(exist_ok=True)
         
-        # Initialize components, using the pre-loaded model if provided
-        self._initialize_components(qwq_model)
+        self._initialize_components()
     
-    def _initialize_components(self, qwq_model=None):
-        """Initialize all processing components with a single, unified model."""
-        logger.info(f"Initializing components for {self.mode} mode")
+    def _initialize_components(self):
+        """Initialize all processing components."""
+        logger.info("Initializing components for the unified rich pipeline...")
 
-        # Use the provided qwq_model or create a new one
-        if qwq_model:
-            self.qwq_model = qwq_model
-        else:
-            self.qwq_model = QwQModel(
-                model_path=self.config['model_config']['gguf_path'],
-                device=self.device
-            )
-        
-        # The EnhancedAttentionExtractor will now use the unified model
-        self.attention_extractor = EnhancedAttentionExtractor(
-            qwq_model=self.qwq_model # Pass the unified model
+        self.qwq_model = QwQModel(
+            model_path=self.config['model_config']['gguf_path'],
+            device=self.device
         )
         
-        self.seeder = InstructionSeeder()
-        
+        self.attention_extractor = EnhancedAttentionExtractor(qwq_model=self.qwq_model)
+        self.partitioner = PartitionManager(self.attention_extractor)
         self.graph_processor = GraphProcessor(
             attention_extractor=self.attention_extractor,
-            ollama_extractor=self.qwq_model # Pass the unified model
+            ollama_extractor=self.qwq_model
         )
         self.graph_reassembler = GraphReassembler()
-        self.partitioner = PartitionManager(self.attention_extractor)
-
-        # Initialize SOM Generator
-        self.som_generator = SOM_DocumentGenerator(
-            llm_client=self.qwq_model, # Pass the unified model
-            embedding_model=self.graph_processor.embedding_model,
-            partitioner=self.partitioner
-        )
-        logger.info("Initialized core components for all pipelines.")
+        
+        logger.info("All components initialized.")
     
-    def process_text(self, text: str, rules: Optional[Dict[str, str]] = None, rich: bool = False, som: bool = False) -> Dict[str, Any]:
-        """Process text using the configured mode"""
-        if som:
-            return self._process_som_pipeline(text)
-        elif rich:
-            return self._process_rich_pipeline(text, rules)
-        else: # Default to single-pass
-            return self._process_single_pass(text, rules)
-    
-    def _process_som_pipeline(self, text: str) -> Dict[str, Any]:
-        """
-        Process text using the Self-Organizing Map pipeline.
-        """
-        logger.info("Starting SOM-based processing pipeline...")
+    def process_text(self, text: str) -> Dict[str, Any]:
+        """Process text using the unified rich pipeline."""
         start_time = time.time()
-
-        reassembled_text = self.som_generator.assemble_document(text)
         
-        processing_time = time.time() - start_time
-
-        return {
-            'mode': 'som-pipeline',
-            'input_length': len(text),
-            'processing_time': processing_time,
-            'output': {'reassembled_text': reassembled_text},
-            'metadata': {
-                'model': 'QwQ-32B + MiniLM-L6-v2',
-                'architecture': 'Tape-Map-Path-Tape',
-                'timestamp': datetime.now().isoformat()
-            }
-        }
-
-    def _process_rich_pipeline(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """
-        Process text using the rich pipeline, which includes multi-round
-        annotation and optional language guidance.
-        """
-        logger.info("Starting rich processing pipeline...")
-        if rules:
-            logger.info(f"Applying language guidance rules: {rules}")
-        
-        start_time = time.time()
-
-        # This pipeline will use the multi-round processing logic
-        logger.info("Phase 1: Partitioning text into segments...")
-        segment_contents = self.partitioner.create_partitions(text)
-        segments = [{'content': content} for content in segment_contents]
-        logger.info(f"Created {len(segments)} optimal segments.")
-
-        logger.info("Phase 2: Processing graph with multi-round annotations...")
-        graph_data = self.graph_processor.process(segments, multi_round=True)
-        logger.info(f"Processed graph with {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
-
-        logger.info("Phase 3: Reassembling document from graph...")
-        reassembled = self.graph_reassembler.reassemble(
-            graph_data['nodes'],
-            graph_data['edges'],
-            strategy="layered_assembly",
-            original_document=text
+        results = run_rich_pipeline(
+            text=text,
+            partition_manager=self.partitioner,
+            graph_processor=self.graph_processor,
+            graph_reassembler=self.graph_reassembler
         )
         
         processing_time = time.time() - start_time
-
-        return {
-            'mode': 'rich-pipeline',
-            'input_length': len(text),
-            'nodes': len(graph_data['nodes']),
-            'edges': len(graph_data['edges']),
-            'processing_time': processing_time,
-            'output': reassembled,
-            'metadata': {
-                'model': 'QwQ-32B',
-                'architecture': 'Tape-to-Graph-Rich',
-                'timestamp': datetime.now().isoformat()
-            }
-        }
-
-    def _process_single_pass(self, text: str, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """
-        Process text using the simplified, three-phase pipeline.
-        """
-        logger.info("Starting refactored single-pass processing...")
-        start_time = time.time()
-
-        # 1. Disassembly Phase (Tape to Nodes)
-        logger.info("Phase 1: Partitioning text into segments...")
-        segment_contents = self.partitioner.create_partitions(text)
-        logger.info(f"Created {len(segment_contents)} optimal segments.")
-
-        # Prepare segments for graph processor, which expects a list of dicts
-        segments = [{'content': content} for content in segment_contents]
-
-        # 2. Reconstruction Phase (Nodes to Graph)
-        logger.info("Phase 2: Processing segments into a graph...")
-        graph_data = self.graph_processor.process(segments)
-        logger.info(f"Processed graph with {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
-
-        # 3. Reassembly Phase (Graph to Document)
-        logger.info("Phase 3: Reassembling document from graph...")
-        reassembled = self.graph_reassembler.reassemble(
-            graph_data['nodes'],
-            graph_data['edges'],
-            strategy="layered_assembly",
-            original_document=text
-        )
+        results['processing_time'] = processing_time
         
-        processing_time = time.time() - start_time
-
-        return {
-            'mode': 'refactored-single-pass',
-            'input_length': len(text),
-            'nodes': len(graph_data['nodes']),
-            'edges': len(graph_data['edges']),
-            'processing_time': processing_time,
-            'output': reassembled,
-            'metadata': {
-                'model': 'QwQ-32B',
-                'architecture': 'Tape-to-Graph-Refactored',
-                'timestamp': datetime.now().isoformat()
-            }
-        }
-
-    def _classify_edge_relationships(self, nodes: List[Dict], edges: List[Dict]) -> List[Dict]:
-        """Use LLM to classify the relationship type for important edges."""
-        if not self.ollama_extractor:
-            logger.warning("LLM extractor not available, skipping edge classification.")
-            return edges
-
-        node_map = {node['id']: node for node in nodes}
-        
-        important_nodes = {n['id'] for n in nodes if n.get('classification') in ['KEEP', 'TRACK']}
-        
-        for edge in tqdm(edges, desc="Classifying Edges"):
-            source_id = edge.get('source')
-            target_id = edge.get('target')
-
-            if source_id in important_nodes and target_id in important_nodes:
-                source_node = node_map.get(source_id)
-                target_node = node_map.get(target_id)
-
-                if source_node and target_node:
-                    if not hasattr(self, 'llm_synthesizer'):
-                        from synthesis.llm_tape_synthesizer import LLMTapeSynthesizer
-                        # Pass the single, shared QwQ model instance
-                        self.llm_synthesizer = LLMTapeSynthesizer(qwq_model=self.qwq_model)
-
-                    relationship = self.llm_synthesizer.classify_edge_relationship(
-                        source_node['content'],
-                        target_node['content']
-                    )
-                    edge['type'] = relationship
-                    edge['classified'] = True
-        
-        return edges
+        return results
     
     def save_results(self, results: Dict[str, Any], filename: str = None) -> Path:
         """Save processing results with full text preservation"""
@@ -347,20 +176,9 @@ class FullMasterProcessor:
         logger.info(f"Text results saved to {output_path}")
 
 def main():
-    """Main entry point"""
+    """Main entry point for the unified rich pipeline."""
     parser = argparse.ArgumentParser(
-        description='Full Layered Context Graph Processor with QwQ Integration',
-    )
-    
-    parser.add_argument(
-        '--rich',
-        action='store_true',
-        help='Enable rich processing with multi-round annotation and language guidance.'
-    )
-    parser.add_argument(
-        '--som',
-        action='store_true',
-        help='Enable the Self-Organizing Map pipeline.'
+        description='Layered Context Graph Processor with a Unified Rich Pipeline',
     )
     
     parser.add_argument('--input', '-i', required=True, help='Input text file path')
@@ -368,14 +186,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Determine mode based on flags
-    if args.som:
-        mode = 'som-pipeline'
-    elif args.rich:
-        mode = 'rich'
-    else:
-        mode = 'single-pass'
-    config = get_config(mode=mode, model_type='ollama')
+    config = get_config(model_type='ollama')
     
     if args.output:
         config['paths']['results_dir'] = Path(args.output)
@@ -389,21 +200,18 @@ def main():
     logger.info(f"Loaded input file: {input_path} ({len(text)} characters)")
     
     try:
-        # The model is now loaded directly by the FullMasterProcessor
         processor = FullMasterProcessor(config)
-        logger.info(f"Starting {mode} processing with pre-loaded QwQ...")
-        results = processor.process_text(text, rich=args.rich, som=args.som)
+        logger.info("Starting unified rich processing with pre-loaded QwQ...")
+        results = processor.process_text(text)
         output_path = processor.save_results(results)
         
         print("\n" + "="*60)
-        print("QWQ-POWERED PROCESSING COMPLETE")
+        print("UNIFIED RICH PIPELINE PROCESSING COMPLETE")
         print("="*60)
-        print(f"Mode: {results['mode']}")
-        print(f"Model: {results['metadata'].get('model', 'QwQ-32B')}")
         print(f"Input length: {results.get('input_length', len(text))} characters")
-        print(f"Knowledge graph nodes: {results['nodes']}")
-        print(f"Knowledge graph edges: {results['edges']}")
-        print(f"Processing time: {results['processing_time']:.2f} seconds")
+        print(f"Knowledge graph nodes: {results.get('nodes', 0)}")
+        print(f"Knowledge graph edges: {results.get('edges', 0)}")
+        print(f"Processing time: {results.get('processing_time', 0):.2f} seconds")
         print(f"Results saved to: {output_path}")
         
     except Exception as e:

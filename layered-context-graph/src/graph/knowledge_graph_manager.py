@@ -46,7 +46,18 @@ class KnowledgeGraphManager:
             source = edge_data.get('source')
             target = edge_data.get('target')
             if source is not None and target is not None and G.has_node(source) and G.has_node(target):
-                G.add_edge(source, target, weight=edge_data.get('weight', 1.0))
+                weight = edge_data.get('weight', 1.0)
+                # Ensure weight is a float, extracting from dict if necessary
+                if isinstance(weight, dict):
+                    weight = weight.get('attention', 1.0)
+                
+                # Final check to ensure the weight is a valid float
+                try:
+                    final_weight = float(weight)
+                except (ValueError, TypeError):
+                    final_weight = 1.0
+                
+                G.add_edge(source, target, weight=final_weight)
                 
         return G
 

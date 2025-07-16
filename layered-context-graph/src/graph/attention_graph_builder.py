@@ -190,6 +190,9 @@ class AttentionGraphBuilder:
         # The new EdgeDetector handles this logic internally.
         # We can add a simple content-based fallback if needed.
         content_edges = self._create_content_based_edges(segments)
+        for edge in content_edges:
+            if isinstance(edge['weight'], dict):
+                edge['weight'] = float(edge['weight'].get('attention', 1.0))
         edges.extend(content_edges)
         
         return edges

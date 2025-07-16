@@ -8,3 +8,4 @@ recup_*/
 dataset/
 data/
 *.safetensors
+*.pt
