@@ -8,17 +8,21 @@ Reassembly phases to produce a high-quality, structured output.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
+import json
 
 from partitioning.partition_manager import PartitionManager
 from graph.processor import GraphProcessor
 from graph.graph_reassembler import GraphReassembler
+from models.qwq_model import QwQModel
 
 logger = logging.getLogger(__name__)
 
 async def run_rich_pipeline(
     text: str,
-    partition_manager: PartitionManager,
+    qwq_model: QwQModel,
+    k_rules: List[str],
+    g_rule: str,
     graph_processor: GraphProcessor,
     graph_reassembler: GraphReassembler
 ) -> Dict[str, Any]:
@@ -27,7 +31,9 @@ async def run_rich_pipeline(
 
     Args:
         text: The raw input text.
-        partition_manager: An initialized PartitionManager instance.
+        qwq_model: An initialized QwQModel instance.
+        k_rules: A list of natural language rules for segmentation.
+        g_rule: A natural language rule for reassembly.
         graph_processor: An initialized GraphProcessor instance.
         graph_reassembler: An initialized GraphReassembler instance.
 
@@ -36,19 +42,17 @@ async def run_rich_pipeline(
     """
     logger.info("--- Starting Unified Rich Pipeline ---")
 
-    # 1. Disassembly Phase (Tape -> Segments)
-    logger.info("Phase 1: Disassembly - Creating optimal segments...")
-    # Ensure the full iterative process is used
+    # 1. Disassembly Phase (Tape -> Segments) using the new LLM-driven PartitionManager
+    logger.info("Phase 1: Disassembly - Creating segments with LLM and K-Rules...")
+    partition_manager = PartitionManager(qwq_model=qwq_model, k_rules_by_round=k_rules)
     optimal_segments = partition_manager.create_partitions(text)
     logger.info(f"Disassembly complete. Produced {len(optimal_segments)} optimal segments.")
     
-    # Save disassembly report if in debug mode
-    if partition_manager.disassembly_rules.get('debug', False):
-        report_path = "disassembly_report.json"
-        with open(report_path, 'w') as f:
-            import json
-            json.dump(partition_manager.get_segmentation_summary(), f, indent=2)
-        logger.info(f"Disassembly report saved to {report_path}")
+    # Save disassembly report
+    report_path = "disassembly_report.json"
+    with open(report_path, 'w') as f:
+        json.dump(partition_manager.get_segmentation_summary(), f, indent=2)
+    logger.info(f"Disassembly report saved to {report_path}")
 
     # 2. Reassembly Phase (Segments -> Graph -> Output)
     logger.info("Phase 2: Reassembly - Building and enriching the graph...")

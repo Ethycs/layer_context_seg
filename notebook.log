@@ -1,5 +1,3 @@
 INFO:__main__:Project root set to: /workspaces/layer_context_seg
-INFO:models.qwq_model:Initializing model loading process for /workspaces/layer_context_seg/qwq.gguf...
-INFO:models.qwq_model:QwQModel is fully initialized and ready.
-INFO:__main__:QwQModel pre-loaded successfully.
-INFO:__main__:Generated text:  in a kingdom far away, there was a princess named Isabella. She lived in a grand castle with her parents, the king and queen. Isabella was known throughout the land for her kindness and her love of stories. Every night, her parents would tell her a story before she went to sleep. But one night, the stories stopped. The queen had fallen ill, and the king was too busy with the affairs of the kingdom to take her place. Isabella was sad and lonely. She missed the stories and the closeness she felt with her parents during that special time. One day, while exploring the castle, Isabella discovered an old, dusty book in the library. It was a book of fairy tales, but unlike any she had
+INFO:models.baai_model:Lazy loading BGE-EN-ICL model from bge-en-icl...
+INFO:models.baai_model:BGE-EN-ICL model loaded successfully onto GPU

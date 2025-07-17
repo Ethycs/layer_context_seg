@@ -15,8 +15,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-import httpx
 import time
+import torch
 
 # Add src directory to path
 project_root = Path(__file__).parent.resolve()
@@ -27,52 +27,13 @@ sys.path.insert(0, str(src_path))
 from master_config import get_config
 
 # Import core modules
-from partitioning.partition_manager import PartitionManager
+from models.qwq_model import QwQModel
 from graph.graph_reassembler import GraphReassembler
 from graph.processor import GraphProcessor
 from rich_pipeline import run_rich_pipeline
 
-# --- Configuration -------------------------------------------------
-MODEL_SERVER_URL = "http://127.0.0.1:5001"
-# -------------------------------------------------------------------
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-class ModelServerClient:
-    """A client for the FastAPI model server."""
-    def __init__(self, base_url: str):
-        self.base_url = base_url
-        self.client = httpx.AsyncClient(timeout=None)
-
-    async def generate(self, prompt: str, max_tokens: int = 150) -> str:
-        response = await self.client.post(
-            f"{self.base_url}/generate",
-            json={"prompt": prompt, "max_tokens": max_tokens}
-        )
-        response.raise_for_status()
-        return response.json()["generated_text"]
-
-    async def extract_attention(self, texts: List[str]) -> Dict:
-        # The server expects a list of texts, but the client was sending a single string.
-        # This is a placeholder implementation that sends the first text.
-        # A more robust implementation would handle multiple texts.
-        if not texts:
-            return {}
-        
-        # For now, we process one segment at a time as before.
-        # A future improvement would be to batch these requests.
-        text = texts[0]
-        
-        response = await self.client.post(
-            f"{self.base_url}/extract_attention",
-            json={"text": text}
-        )
-        response.raise_for_status()
-        
-        # The server now returns the full attention data, which we pass along.
-        return response.json()
-
 
 class FullMasterProcessor:
     """A simplified processor that runs the single, unified rich pipeline."""
@@ -80,7 +41,7 @@ class FullMasterProcessor:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.output_dir = self.config['paths']['results_dir']
-        self.model_client = ModelServerClient(MODEL_SERVER_URL)
+        self.qwq_model = None
         
         self.output_dir.mkdir(exist_ok=True)
         
@@ -90,23 +51,26 @@ class FullMasterProcessor:
         """Initialize all processing components."""
         logger.info("Initializing components...")
         
-        # The components now use the model client instead of a direct model instance
-        self.partitioner = PartitionManager()
-        self.graph_processor = GraphProcessor(
-            attention_extractor=self.model_client,
-            ollama_extractor=self.model_client
-        )
+        # Load the QwQModel directly
+        model_path = self.config['paths']['model_path']
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.qwq_model = QwQModel(model_path, device)
+        
+        # Initialize other components (they might not be needed for the pure LLM pipeline)
+        self.graph_processor = GraphProcessor(attention_extractor=self.qwq_model)
         self.graph_reassembler = GraphReassembler()
         
         logger.info("All components initialized.")
     
-    async def process_text(self, text: str) -> Dict[str, Any]:
+    async def process_text(self, text: str, k_rules: List[str], g_rule: str) -> Dict[str, Any]:
         """Process text using the unified rich pipeline."""
         start_time = time.time()
         
         results = await run_rich_pipeline(
             text=text,
-            partition_manager=self.partitioner,
+            qwq_model=self.qwq_model,
+            k_rules=k_rules,
+            g_rule=g_rule,
             graph_processor=self.graph_processor,
             graph_reassembler=self.graph_reassembler
         )
@@ -133,11 +97,13 @@ class FullMasterProcessor:
 async def main():
     """Main entry point for the unified rich pipeline."""
     parser = argparse.ArgumentParser(
-        description='Layered Context Graph Processor Client',
+        description='Layered Context Graph Processor',
     )
     
     parser.add_argument('--input', '-i', required=True, help='Input text file path')
     parser.add_argument('--output', '-o', help='Output directory')
+    parser.add_argument('--k-rules', nargs='+', help='List of K-rules for segmentation rounds.', required=True)
+    parser.add_argument('--g-rule', help='G-rule for reassembly.', required=True)
     
     args = parser.parse_args()
     
@@ -157,7 +123,7 @@ async def main():
     try:
         processor = FullMasterProcessor(config)
         logger.info("Starting unified rich processing...")
-        results = await processor.process_text(text)
+        results = await processor.process_text(text, args.k_rules, args.g_rule)
         output_path = processor.save_results(results)
         
         print("\n" + "="*60)

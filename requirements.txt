@@ -26,3 +26,4 @@ gguf
 llama-cpp-python
 ipykernel
 h5py
+sentencepiece

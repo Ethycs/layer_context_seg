@@ -3,21 +3,46 @@ from tqdm import tqdm
 import os
 from pathlib import Path
 
-def download_files():
+def download_bge_en_icl():
     """
-    Downloads the 14 shards of the QwQ-32B model from Hugging Face.
+    Downloads the BAAI/bge-en-icl model files from Hugging Face.
     """
-    base_url = "https://huggingface.co/Qwen/QwQ-32B/resolve/main/"
-    output_dir = Path("./QwQ-32B")
+    # --- Configuration ---
+    model_repo = "BAAI/bge-en-icl"
+    output_dir_name = "bge-en-icl"
+    
+    # Files to download (excluding .gitattributes and README.md)
+    files_to_download = [
+        "added_tokens.json",
+        "config.json",
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+        "model.safetensors.index.json",
+        "modules.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "1_Pooling/config.json"
+    ]
+    # ---------------------
+
+    base_url = f"https://huggingface.co/{model_repo}/resolve/main/"
+    output_dir = Path(f"./{output_dir_name}")
     output_dir.mkdir(exist_ok=True)
     
-    num_shards = 14
+    print(f"--- Starting Download for {model_repo} ---")
+    print(f"Files will be saved in: {output_dir.resolve()}")
     
-    for i in range(1, num_shards + 1):
-        # Note: The URL uses 'model-00001-of-00014.safetensors' format, not zero-padded total shards.
-        filename = f"model-{i:05d}-of-00014.safetensors"
+    for filename in files_to_download:
         download_url = f"{base_url}{filename}?download=true"
         output_path = output_dir / filename
+        
+        # Create subdirectory if needed
+        if "/" in filename:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
         
         if output_path.exists():
             print(f"File '{filename}' already exists. Skipping.")
@@ -43,6 +68,9 @@ def download_files():
                 os.remove(output_path) # Clean up partial download
             print("Stopping download process due to error.")
             break
+    
+    print("\n--- Download Complete ---")
 
 if __name__ == "__main__":
-    download_files()
+    # Ensure you have the necessary libraries: pip install requests tqdm
+    download_bge_en_icl()
