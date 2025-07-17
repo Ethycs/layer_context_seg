@@ -16,7 +16,7 @@ from graph.graph_reassembler import GraphReassembler
 
 logger = logging.getLogger(__name__)
 
-def run_rich_pipeline(
+async def run_rich_pipeline(
     text: str,
     partition_manager: PartitionManager,
     graph_processor: GraphProcessor,
@@ -38,14 +38,23 @@ def run_rich_pipeline(
 
     # 1. Disassembly Phase (Tape -> Segments)
     logger.info("Phase 1: Disassembly - Creating optimal segments...")
+    # Ensure the full iterative process is used
     optimal_segments = partition_manager.create_partitions(text)
     logger.info(f"Disassembly complete. Produced {len(optimal_segments)} optimal segments.")
+    
+    # Save disassembly report if in debug mode
+    if partition_manager.disassembly_rules.get('debug', False):
+        report_path = "disassembly_report.json"
+        with open(report_path, 'w') as f:
+            import json
+            json.dump(partition_manager.get_segmentation_summary(), f, indent=2)
+        logger.info(f"Disassembly report saved to {report_path}")
 
     # 2. Reassembly Phase (Segments -> Graph -> Output)
     logger.info("Phase 2: Reassembly - Building and enriching the graph...")
     
     # The GraphProcessor will be enhanced to perform multi-round enrichment
-    graph_data = graph_processor.process(
+    graph_data = await graph_processor.process(
         segments=[{'content': s} for s in optimal_segments],
         multi_round=True # This will be implemented next
     )

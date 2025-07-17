@@ -32,25 +32,17 @@ class EdgeDetector:
         self.attention_threshold = attention_threshold
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    def detect_edges(self, nodes: List[Dict[str, Any]], use_attention: bool = True) -> List[Dict[str, Any]]:
+    def detect_edges(self, nodes: List[Dict[str, Any]], use_attention: bool = True, attention_data: Dict = None) -> List[Dict[str, Any]]:
         """
         Detect all types of edges between nodes.
         If use_attention is True and an attention_extractor is available,
         it will prioritize attention-based edge detection.
         """
-        if use_attention and self.attention_extractor:
+        if use_attention and self.attention_extractor and attention_data and 'window_patterns' in attention_data:
             logger.info("Using attention-based edge detection.")
-            # Extract contents for attention processing
-            contents = [node.get('content', '') for node in nodes]
-            attention_patterns = self.attention_extractor.extract_attention_for_tape_splitting(contents)
-            
-            if attention_patterns:
-                return self._detect_edges_from_attention(nodes, attention_patterns)
-            else:
-                logger.warning("Attention extraction failed, falling back to rule-based detection.")
-                return self._detect_edges_rule_based(nodes)
+            return self._detect_edges_from_attention(nodes, attention_data)
         else:
-            logger.info("Using rule-based edge detection.")
+            logger.info("No attention data found, using rule-based edge detection.")
             return self._detect_edges_rule_based(nodes)
 
     # --- Attention-Based Methods ---

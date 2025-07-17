@@ -117,7 +117,7 @@ class KnowledgeGraphManager:
 
         return nodes
 
-    def condense_graph(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
+    async def condense_graph(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
         """
         Main entry point to condense the graph.
         """
@@ -125,7 +125,7 @@ class KnowledgeGraphManager:
         
         text_nodes, code_nodes, other_nodes = self._classify_node_types(nodes)
         
-        condensed_text_nodes, text_mappings = self._condense_text_nodes(text_nodes, llm_extractor, embedding_model)
+        condensed_text_nodes, text_mappings = await self._condense_text_nodes(text_nodes, llm_extractor, embedding_model)
         
         deduplicated_code_nodes, code_deletions = self._deduplicate_code_nodes(code_nodes)
         
@@ -147,12 +147,12 @@ class KnowledgeGraphManager:
                 text_nodes.append(node)
         return text_nodes, code_nodes, other_nodes
 
-    def _condense_text_nodes(self, nodes: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict], Dict):
+    async def _condense_text_nodes(self, nodes: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict], Dict):
         """Merge clusters of similar text nodes using an LLM."""
         if len(nodes) < 2 or not embedding_model:
             return nodes, {}
             
-        logger.info(f"Condensing {len(nodes)} text nodes.")
+        logger.info(f"Condensing {len(nodes)} text nodes using the embedding model.")
         
         contents = [node['content'] for node in nodes]
         embeddings = embedding_model.encode(contents, show_progress_bar=False)
@@ -173,7 +173,7 @@ class KnowledgeGraphManager:
             cluster_nodes = [nodes[i] for i in cluster_indices]
             logger.info(f"Merging cluster {cluster_id} with {len(cluster_nodes)} nodes.")
             
-            new_content = self._synthesize_content(cluster_nodes, llm_extractor)
+            new_content = await self._synthesize_content(cluster_nodes, llm_extractor)
             
             new_node_id = f"condensed_text_{cluster_id}"
             new_node = {
@@ -190,7 +190,7 @@ class KnowledgeGraphManager:
                 
         return new_nodes, mappings
 
-    def _synthesize_content(self, nodes_to_merge: List[Dict[str, Any]], llm_client) -> str:
+    async def _synthesize_content(self, nodes_to_merge: List[Dict[str, Any]], llm_client) -> str:
         """Use LLM to synthesize content from a list of nodes."""
         if not llm_client:
             return "\n\n".join([n['content'] for n in nodes_to_merge])
@@ -201,7 +201,7 @@ class KnowledgeGraphManager:
         prompt += "--- Synthesized Paragraph ---\n"
         
         try:
-            response = llm_client.generate_text(prompt, max_length=512)
+            response = await llm_client.generate(prompt, max_tokens=512)
             return response.strip()
         except Exception as e:
             logger.error(f"LLM synthesis for condensing failed: {e}")

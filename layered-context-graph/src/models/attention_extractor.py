@@ -19,21 +19,18 @@ class EnhancedAttentionExtractor:
     This is the primary and only model used for tape splitting.
     """
     
-    def __init__(self, model_path: str = None, qwq_model: QwQModel = None):
+    def __init__(self, qwq_model: QwQModel):
         """
         Initialize the QwQ attention extractor
         
         Args:
-            model_path: Optional custom path to QwQ GGUF model file
-            qwq_model: Optional existing QwQModel instance to reuse
+            qwq_model: An existing QwQModel instance to reuse
         """
-        self.model_path = model_path
+        if not qwq_model:
+            raise ValueError("A pre-loaded QwQModel instance is required.")
+            
         self.qwq_model = qwq_model
         self.attention_cache = {}
-        
-        if not self.qwq_model:
-            logger.info("No QwQModel provided, initializing a new one.")
-            self.qwq_model = QwQModel(self.model_path or self._find_qwq_model())
         
         # For compatibility, some methods might expect an 'ollama_extractor' attribute
         self.ollama_extractor = self.qwq_model

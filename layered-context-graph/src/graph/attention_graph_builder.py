@@ -41,8 +41,11 @@ class AttentionGraphBuilder:
         Returns:
             Dictionary representing the knowledge graph with nodes and edges
         """
-        if not attention_data or 'attention' not in attention_data or not segments:
-            # Fall back to simple sequential graph
+        if not segments:
+            return {'nodes': [], 'edges': []}
+
+        # Fall back to sequential graph if attention data is missing or empty
+        if not attention_data or 'attentions' not in attention_data or not attention_data['attentions']:
             return self._build_sequential_graph(segments)
         
         graph = {
@@ -61,7 +64,7 @@ class AttentionGraphBuilder:
         # Use the consolidated edge detector
         if isinstance(graph['nodes'], list):
             # The new EdgeDetector handles both attention and rule-based detection
-            enhanced_edges = self.edge_detector.detect_edges(graph['nodes'], use_attention=True)
+            enhanced_edges = self.edge_detector.detect_edges(graph['nodes'], use_attention=True, attention_data=attention_data)
             
             if enhanced_edges:
                 graph['edges'].extend(enhanced_edges)

@@ -73,6 +73,8 @@ PROCESSING_SETTINGS = {
     'fluff_removal': True,
     'preserve_code_blocks': True,
     'similarity_threshold': 0.95,
+    'multi_round_enrichment': True,
+    'enrichment_rounds': 3,
 }
 
 # Core processing configurations
@@ -96,6 +98,9 @@ MODEL_CONFIGS = {
     'ollama': {
         'default_model': 'qwq',
         'gguf_path': PROJECT_ROOT / 'qwq.gguf',
+    },
+    'debug': {
+        'default_model': 'distilbert-base-uncased',
     }
 }
 

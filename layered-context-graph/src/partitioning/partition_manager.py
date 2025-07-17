@@ -3,19 +3,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 class PartitionManager:
-    def __init__(self, attention_extractor=None, overlap_ratio=0.25, target_segment_length=400, max_rounds=5):
+    def __init__(self, attention_extractor=None, overlap_ratio=0.25, target_segment_length=400, max_rounds=5, disassembly_rules=None):
         self.attention_extractor = attention_extractor
         self.overlap_ratio = overlap_ratio
         self.target_segment_length = target_segment_length  # Target average segment length
         self.max_rounds = max_rounds  # Maximum segmentation rounds
         self.partitions = []
         self.segmentation_history = []  # Track each round of segmentation
-        self.disassembly_rules = {
+        self.disassembly_rules = disassembly_rules or {
             'semantic_boundaries': True,
             'attention_clusters': True,
             'percolation_thresholds': True,
             'instruction_markers': True,
-            'conversation_boundaries': False  # New: for conversation tracking
+            'conversation_boundaries': False,  # New: for conversation tracking
+            'debug': False
         }
         self.partition_metadata = []
 

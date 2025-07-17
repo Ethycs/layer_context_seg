@@ -8,12 +8,12 @@ into a PyTorch-compatible architecture using a robust, streaming loader.
 
 import logging
 import torch
+import numpy as np
 from pathlib import Path
 from transformers import AutoTokenizer
 
-# Import the robust loader and the model architecture
-from utils.convert_gguf_to_pytorch import StreamingModelLoader
-from models.qwq_architecture import QwQConfig, QwQForCausalLM
+from llama_cpp import Llama
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +36,11 @@ class QwQModel:
 
     def _load_model_and_tokenizer(self):
         """
-        Loads the model using the robust StreamingModelLoader and initializes the tokenizer.
+        Loads the model using the llama-cpp-python library.
         """
         logger.info(f"Initializing model loading process for {self.model_path}...")
         
-        # Use the robust, memory-safe streaming loader
-        # This will handle the one-time conversion and subsequent loading
-        loader = StreamingModelLoader(str(self.model_path), device=self.device)
-        self.model, self.config = loader.load_model(QwQForCausalLM)
-        
-        # The model is now loaded and on the correct device
-        self.model.eval()
-        
-        # Load the appropriate tokenizer
-        logger.info("Loading tokenizer...")
+        self.model = Llama(model_path=str(self.model_path), n_ctx=2048)
         self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-32B", trust_remote_code=True)
         
         logger.info("QwQModel is fully initialized and ready.")
@@ -58,31 +49,35 @@ class QwQModel:
         """
         Generates text using the loaded model.
         """
-        if not self.model or not self.tokenizer:
+        if not self.model:
             raise RuntimeError("Model is not loaded.")
         
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.generate(**inputs, max_new_tokens=max_tokens)
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        output = self.model(prompt, max_tokens=max_tokens, echo=False)
+        return output['choices'][0]['text']
 
     def extract_attention(self, text: str) -> dict:
         """
         Extracts attention weights from the model for the given text.
         """
-        if not self.model or not self.tokenizer:
-            raise RuntimeError("Model is not loaded.")
-            
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model(input_ids=inputs.input_ids, output_attentions=True)
-        
-        # Move attentions to CPU to free up VRAM
-        return {i: layer_attention.cpu() for i, layer_attention in enumerate(outputs.attentions)}
+        logger.warning("Attention extraction is not supported by the Llama CPP model.")
+        return {"attentions": []}
 
     def get_model_config(self) -> dict:
         """Returns the model's configuration."""
         return self.config.to_dict()
+
+    def get_embedding(self, text: str) -> np.ndarray:
+        """Generates a high-quality embedding for the given text."""
+        if not self.model or not self.tokenizer:
+            raise RuntimeError("Model is not loaded.")
+        
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(self.device)
+        with torch.no_grad():
+            outputs = self.model.model(input_ids=inputs.input_ids)
+        
+        # Use the average of the last hidden state as the embedding
+        embedding = outputs[0].mean(dim=1).squeeze().cpu().numpy()
+        return embedding
 
     def classify_relationship(self, node1_content: str, node2_content: str) -> str:
         """

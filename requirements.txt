@@ -23,6 +23,6 @@ pytest>=7.0.0
 jupyter>=1.0.0
 
 gguf
-llama_cpp_python/
+llama-cpp-python
 ipykernel
 h5py

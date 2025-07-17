@@ -21,7 +21,7 @@ class GraphProcessor:
     graph creation to hierarchical structuring.
     """
 
-    def __init__(self, attention_extractor=None, ollama_extractor=None):
+    def __init__(self, attention_extractor=None, ollama_extractor=None, config=None):
         """
         Initialize the GraphProcessor with necessary components.
         
@@ -30,13 +30,14 @@ class GraphProcessor:
                                  Relies on the primary 'qwq' model.
             ollama_extractor: The primary LLM ('qwq') used for high-level reasoning
                               and content synthesis.
+            config: The main application configuration.
         """
         self.attention_graph_builder = AttentionGraphBuilder(attention_extractor=attention_extractor)
         self.hierarchical_builder = HierarchicalGraphBuilder()
-        # The ollama_extractor is the main reasoning engine (e.g., qwq model)
+        self.attention_extractor = attention_extractor
         self.ollama_extractor = ollama_extractor
-        # The embedding_model is a specialized, lightweight model for calculating similarity
         self.embedding_model = self._load_embedding_model()
+        self.config = config or {}
 
     def _load_embedding_model(self):
         """
@@ -51,13 +52,27 @@ class GraphProcessor:
             logger.warning("SentenceTransformers not installed. Text node condensation will be skipped.")
             return None
 
-    def process(self, segments: List[Dict[str, Any]], multi_round: bool = False, rounds: int = 3) -> Dict[str, List[Dict]]:
+    async def process(self, segments: List[Dict[str, Any]], multi_round: bool = False, rounds: int = 3) -> Dict[str, List[Dict]]:
         """
         Execute the full graph processing pipeline, with optional multi-round enrichment.
         """
         logger.info(f"Starting graph processing for {len(segments)} segments.")
         segment_contents = [s['content'] for s in segments]
-        initial_graph = self.attention_graph_builder.build_from_attention({}, segment_contents)
+        
+        # Extract attention data before building the graph
+        attention_data = {}
+        if self.attention_extractor:
+            logger.info("Extracting attention data for graph construction...")
+            try:
+                # The extractor now returns a dictionary with the full attention data
+                response_data = await self.attention_extractor.extract_attention(segment_contents)
+                # We need to extract the actual attention list from the response
+                attention_data = response_data.get("attentions", [])
+            except Exception as e:
+                logger.error(f"Attention extraction failed: {e}. Proceeding without attention data.")
+                attention_data = {} # Ensure attention_data is a dict
+        
+        initial_graph = self.attention_graph_builder.build_from_attention(attention_data, segment_contents)
         
         nodes = initial_graph.get('nodes', [])
         edges = initial_graph.get('edges', [])
@@ -79,12 +94,20 @@ class GraphProcessor:
                 nodes = kg_manager.classify_nodes()
                 
                 logger.info("Condensing graph...")
-                nodes, edges = kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
+                nodes, edges = await kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
                 
                 # 2. LLM-based enrichment (if available)
                 if hasattr(kg_manager, 'enrich_graph_with_llm') and self.ollama_extractor:
                     logger.info("Enriching graph with LLM...")
                     nodes, edges = kg_manager.enrich_graph_with_llm(nodes, edges, self.ollama_extractor)
+                
+                # Save intermediate graph if in debug mode
+                if self.config.get('debug', False):
+                    graph_path = f"graph_round_{i+1}.json"
+                    with open(graph_path, 'w') as f:
+                        import json
+                        json.dump({"nodes": nodes, "edges": edges}, f, indent=2)
+                    logger.info(f"Intermediate graph saved to {graph_path}")
 
             logger.info("--- Multi-Round Enrichment Complete ---")
             # Final classification after all rounds
@@ -93,9 +116,10 @@ class GraphProcessor:
         else:
             # Single-pass processing
             logger.info("Classifying nodes...")
-            nodes = kg_manager.classify_nodes(nodes)
+            kg_manager = KnowledgeGraphManager({"nodes": nodes, "edges": edges})
+            nodes = kg_manager.classify_nodes()
             logger.info("Condensing graph...")
-            nodes, edges = kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
+            nodes, edges = await kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
 
         logger.info("Building final hierarchical structure...")
         hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(nodes, edges)
