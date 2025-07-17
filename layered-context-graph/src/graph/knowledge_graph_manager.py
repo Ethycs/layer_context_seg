@@ -1,235 +1,164 @@
-#!/usr/bin/env python3
-"""
-Knowledge Graph Manager
-=======================
-This module provides a manager for classifying nodes in a knowledge graph
-based on their structural importance and content.
-"""
-
 import networkx as nx
-from typing import Dict, List, Any
+import re
+import numpy as np
+from typing import Dict, List, Any, Tuple
 import logging
 from sklearn.cluster import AgglomerativeClustering
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
 class KnowledgeGraphManager:
     """
-    Manages and classifies nodes within a knowledge graph.
+    Manages the creation, enrichment, and classification of nodes and edges
+    within a knowledge graph. This class consolidates the logic from the
+    previous AttentionGraphBuilder and EdgeDetector.
     """
-    
-    def __init__(self, graph: Dict[str, List[Dict]]):
-        """
-        Initialize the manager with a graph.
-        
-        Args:
-            graph: A dictionary with 'nodes' and 'edges' keys.
-        """
-        self.graph_dict = graph
-        self.nx_graph = self._create_networkx_graph(graph)
-    
-    def _create_networkx_graph(self, graph_dict: Dict[str, List[Dict]]) -> nx.DiGraph:
-        """
-        Convert dictionary-based graph to a NetworkX DiGraph.
-        """
-        G = nx.DiGraph()
-        
-        # Add nodes
-        for node_data in graph_dict.get('nodes', []):
-            node_id = node_data.get('id')
-            if node_id is not None:
-                G.add_node(node_id, **node_data)
-        
-        # Add edges
-        for edge_data in graph_dict.get('edges', []):
-            source = edge_data.get('source')
-            target = edge_data.get('target')
-            if source is not None and target is not None and G.has_node(source) and G.has_node(target):
-                weight = edge_data.get('weight', 1.0)
-                # Ensure weight is a float, extracting from dict if necessary
-                if isinstance(weight, dict):
-                    weight = weight.get('attention', 1.0)
-                
-                # Final check to ensure the weight is a valid float
-                try:
-                    final_weight = float(weight)
-                except (ValueError, TypeError):
-                    final_weight = 1.0
-                
-                G.add_edge(source, target, weight=final_weight)
-                
-        return G
 
-    def classify_nodes(self, pagerank_alpha: float = 0.85, importance_threshold: float = 0.1) -> List[Dict[str, Any]]:
-        """
-        Classify nodes as KEEP, TRACK, or DELETE based on PageRank and content.
+    def __init__(self, embedding_model=None, similarity_threshold=0.7):
+        self.embedding_model = embedding_model
+        self.similarity_threshold = similarity_threshold
+
+    def build_initial_graph(self, segments: List[Any]) -> Dict[str, List[Dict]]:
+        """Builds the initial graph from enriched segments."""
+        nodes = self._create_nodes_from_segments(segments)
+        edges = self._create_initial_edges(nodes)
+        return {'nodes': nodes, 'edges': edges}
+
+    def _create_nodes_from_segments(self, segments: List[Any]) -> List[Dict]:
+        """Creates graph nodes from EnrichedSegment objects."""
+        return [
+            {
+                'id': seg.id,
+                'content': seg.content,
+                'has_math': seg.has_math,
+                'has_code': seg.has_code,
+                'tag': seg.tag,
+                'start_pos': seg.start_pos,
+                'end_pos': seg.end_pos,
+                'importance': 0.0 # To be calculated
+            } for seg in segments
+        ]
+
+    def _create_initial_edges(self, nodes: List[Dict]) -> List[Dict]:
+        """Creates sequential and semantic similarity edges."""
+        edges = []
+        # Sequential edges
+        for i in range(len(nodes) - 1):
+            edges.append({'source': nodes[i]['id'], 'target': nodes[i+1]['id'], 'weight': 0.8, 'type': 'sequential'})
+
+        # Semantic similarity edges
+        if self.embedding_model and len(nodes) > 1:
+            contents = [node['content'] for node in nodes]
+            embeddings = self.embedding_model.encode(contents)
+            for i in range(len(nodes)):
+                for j in range(i + 1, len(nodes)):
+                    similarity = np.dot(embeddings[i], embeddings[j])
+                    if similarity > self.similarity_threshold:
+                        edges.append({'source': nodes[i]['id'], 'target': nodes[j]['id'], 'weight': float(similarity), 'type': 'semantic_similarity'})
+        return self._deduplicate_edges(edges)
+
+    def classify_nodes(self, graph: Dict) -> List[Dict]:
+        """Classifies nodes as KEEP, TRACK, or DELETE."""
+        nodes = graph.get('nodes', [])
+        if not nodes: return []
         
-        Args:
-            pagerank_alpha: Damping parameter for PageRank.
-            importance_threshold: Minimum PageRank score to be considered for KEEP.
-            
-        Returns:
-            The list of node dictionaries with an added 'classification' key.
-        """
-        if not self.nx_graph.nodes:
-            return self.graph_dict.get('nodes', [])
+        nx_graph = self._create_networkx_graph(graph)
+        pagerank = nx.pagerank(nx_graph) if nx_graph.nodes else {}
 
-        # Calculate PageRank to determine node importance
-        try:
-            pagerank = nx.pagerank(self.nx_graph, alpha=pagerank_alpha)
-        except nx.PowerIterationFailedConvergence:
-            # Fallback for graphs where PageRank doesn't converge
-            pagerank = {node: 1.0 / len(self.nx_graph) for node in self.nx_graph.nodes()}
-
-        nodes = self.graph_dict.get('nodes', [])
         for node in nodes:
-            node_id = node.get('id')
-            if node_id not in self.nx_graph:
-                node['classification'] = 'DELETE' # Should not happen if graph is built correctly
-                continue
-
-            score = pagerank.get(node_id, 0)
-            content = node.get('content', '')
-
-            # Default classification
-            classification = 'DELETE'
-
-            # Rule 1: High importance nodes are kept
-            if score > importance_threshold:
-                classification = 'KEEP'
+            score = pagerank.get(node['id'], 0)
+            node['importance'] = score
             
-            # Rule 2: Nodes with explicit tracking keywords are tracked
-            if 'TODO' in content or 'FIXME' in content or '?' in content:
-                classification = 'TRACK'
-
-            # Rule 3: Code blocks are generally kept unless they are trivial
-            if node.get('features', {}).get('has_code', False):
-                if len(content.splitlines()) > 2: # Keep non-trivial code blocks
-                    classification = 'KEEP'
-
-            # Rule 4: Very short, non-essential nodes are deleted
-            if len(content.split()) < 10 and classification != 'TRACK':
-                 classification = 'DELETE'
-
-            node['classification'] = classification
-            node['importance_score'] = score
-
+            # Classification logic
+            if 'TODO' in node['content'] or 'FIXME' in node['content'] or '?' in node['content']:
+                node['tag'] = 'TRACK'
+            elif node['has_code'] or node['has_math']:
+                node['tag'] = 'KEEP'
+            elif score < (1.0 / (len(nodes) + 1e-6)) * 0.5: # Low importance
+                node['tag'] = 'DELETE'
+            else:
+                node['tag'] = 'KEEP'
         return nodes
 
-    async def condense_graph(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
-        """
-        Main entry point to condense the graph.
-        """
-        logger.info(f"Starting graph condensation on {len(nodes)} nodes.")
-        
-        text_nodes, code_nodes, other_nodes = self._classify_node_types(nodes)
-        
-        condensed_text_nodes, text_mappings = await self._condense_text_nodes(text_nodes, llm_extractor, embedding_model)
-        
-        deduplicated_code_nodes, code_deletions = self._deduplicate_code_nodes(code_nodes)
-        
-        final_nodes = condensed_text_nodes + deduplicated_code_nodes + other_nodes
-        
-        all_mappings = {**text_mappings, **code_deletions}
-        final_edges = self._rewire_edges(edges, all_mappings)
-        
-        logger.info(f"Graph condensation complete. New node count: {len(final_nodes)}")
-        return final_nodes, final_edges
+    async def condense_graph(self, nodes: List[Dict], edges: List[Dict], llm_client) -> Tuple[List[Dict], List[Dict]]:
+        """Merges clusters of similar text nodes using an LLM."""
+        nodes_to_keep = [n for n in nodes if n.get('tag') != 'DELETE']
+        if len(nodes_to_keep) < 2 or not self.embedding_model:
+            return nodes_to_keep, edges
 
-    def _classify_node_types(self, nodes: List[Dict[str, Any]]) -> (List[Dict], List[Dict], List[Dict]):
-        """Classify nodes into text, code, and other categories."""
-        text_nodes, code_nodes, other_nodes = [], [], []
-        for node in nodes:
-            if '```' in node.get('content', ''):
-                code_nodes.append(node)
-            else:
-                text_nodes.append(node)
-        return text_nodes, code_nodes, other_nodes
-
-    async def _condense_text_nodes(self, nodes: List[Dict[str, Any]], llm_extractor, embedding_model) -> (List[Dict], Dict):
-        """Merge clusters of similar text nodes using an LLM."""
-        if len(nodes) < 2 or not embedding_model:
-            return nodes, {}
-            
-        logger.info(f"Condensing {len(nodes)} text nodes using the embedding model.")
+        contents = [node['content'] for node in nodes_to_keep]
+        embeddings = self.embedding_model.encode(contents)
         
-        contents = [node['content'] for node in nodes]
-        embeddings = embedding_model.encode(contents, show_progress_bar=False)
-        
-        clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=0.7, linkage='average')
+        clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=1.0 - self.similarity_threshold)
         labels = clustering.fit_predict(embeddings)
         
-        new_nodes = []
-        mappings = {}
-        
+        new_nodes, mappings = [], {}
         for cluster_id in set(labels):
             cluster_indices = [i for i, label in enumerate(labels) if label == cluster_id]
-            
             if len(cluster_indices) == 1:
-                new_nodes.append(nodes[cluster_indices[0]])
+                new_nodes.append(nodes_to_keep[cluster_indices[0]])
                 continue
-            
-            cluster_nodes = [nodes[i] for i in cluster_indices]
-            logger.info(f"Merging cluster {cluster_id} with {len(cluster_nodes)} nodes.")
-            
-            new_content = await self._synthesize_content(cluster_nodes, llm_extractor)
-            
-            new_node_id = f"condensed_text_{cluster_id}"
-            new_node = {
-                'id': new_node_id,
-                'content': new_content,
-                'level': min(n.get('level', 0) for n in cluster_nodes),
-                'classification': 'KEEP',
-                'is_condensed': True
-            }
-            new_nodes.append(new_node)
-            
-            for old_node in cluster_nodes:
-                mappings[old_node['id']] = new_node_id
-                
-        return new_nodes, mappings
 
-    async def _synthesize_content(self, nodes_to_merge: List[Dict[str, Any]], llm_client) -> str:
+            cluster_nodes = [nodes_to_keep[i] for i in cluster_indices]
+            new_content = await self._synthesize_content(cluster_nodes, llm_client)
+            
+            # Create a new node representing the cluster
+            representative_node = max(cluster_nodes, key=lambda n: n.get('importance', 0))
+            new_node = representative_node.copy()
+            new_node.update({
+                'id': f"condensed_{cluster_id}",
+                'content': new_content,
+                'metadata': {'condensed_from': [n['id'] for n in cluster_nodes]}
+            })
+            new_nodes.append(new_node)
+            for old_node in cluster_nodes:
+                mappings[old_node['id']] = new_node['id']
+                
+        final_edges = self._rewire_edges(edges, mappings)
+        return new_nodes, final_edges
+
+    async def _synthesize_content(self, nodes: List[Dict], llm_client) -> str:
         """Use LLM to synthesize content from a list of nodes."""
         if not llm_client:
-            return "\n\n".join([n['content'] for n in nodes_to_merge])
-            
-        prompt = "The following text segments are very similar. Please synthesize them into a single, coherent, and concise paragraph that captures the core idea from all of them. Do not lose any key information.\n\n"
-        for i, node in enumerate(nodes_to_merge):
+            return "\n\n".join([n['content'] for n in nodes])
+        
+        prompt = "Synthesize the following similar text segments into a single, coherent paragraph:\n\n"
+        for i, node in enumerate(nodes):
             prompt += f"--- Segment {i+1} ---\n{node['content']}\n\n"
         prompt += "--- Synthesized Paragraph ---\n"
         
-        try:
-            response = await llm_client.generate(prompt, max_tokens=512)
-            return response.strip()
-        except Exception as e:
-            logger.error(f"LLM synthesis for condensing failed: {e}")
-            return "\n\n".join([n['content'] for n in nodes_to_merge])
+        response = await llm_client.generate(prompt, max_tokens=512)
+        return response.strip()
 
-    def _deduplicate_code_nodes(self, nodes: List[Dict[str, Any]]) -> (List[Dict], Dict):
-        """Find the 'most definitive' version of similar code blocks."""
-        logger.info(f"De-duplicating {len(nodes)} code nodes (placeholder).")
-        return nodes, {}
-
-    def _rewire_edges(self, edges: List[Dict[str, Any]], mappings: Dict) -> List[Dict[str, Any]]:
+    def _rewire_edges(self, edges: List[Dict], mappings: Dict) -> List[Dict]:
         """Update edges to point to new, condensed nodes."""
         new_edges = []
         seen_edges = set()
         for edge in edges:
             source = mappings.get(edge['source'], edge['source'])
             target = mappings.get(edge['target'], edge['target'])
-            
-            if source == target:
-                continue
-            
-            edge_tuple = tuple(sorted((str(source), str(target))))
-            if edge_tuple in seen_edges:
-                continue
-            
-            edge['source'] = source
-            edge['target'] = target
-            new_edges.append(edge)
-            seen_edges.add(edge_tuple)
-            
+            if source != target:
+                key = tuple(sorted((source, target)))
+                if key not in seen_edges:
+                    edge['source'], edge['target'] = source, target
+                    new_edges.append(edge)
+                    seen_edges.add(key)
         return new_edges
+
+    def _create_networkx_graph(self, graph_dict: Dict) -> nx.Graph:
+        """Converts a dictionary graph to a NetworkX graph."""
+        G = nx.Graph()
+        for node_data in graph_dict.get('nodes', []):
+            G.add_node(node_data['id'], **node_data)
+        for edge_data in graph_dict.get('edges', []):
+            G.add_edge(edge_data['source'], edge_data['target'], weight=edge_data.get('weight', 1.0))
+        return G
+
+    def _deduplicate_edges(self, edges: List[Dict]) -> List[Dict]:
+        """Remove duplicate edges, keeping the one with the highest weight."""
+        edge_map = {}
+        for edge in edges:
+            key = tuple(sorted((edge['source'], edge['target'])))
+            if key not in edge_map or edge['weight'] > edge_map[key]['weight']:
+                edge_map[key] = edge
+        return list(edge_map.values())

@@ -13,18 +13,20 @@ import json
 
 from partitioning.partition_manager import PartitionManager
 from graph.processor import GraphProcessor
-from graph.graph_reassembler import GraphReassembler
+from synthesis.graph_reassembler import GraphReassembler
 from models.qwq_model import QwQModel
+from models.baai_model import BAAIModel
 
 logger = logging.getLogger(__name__)
 
 async def run_rich_pipeline(
     text: str,
     qwq_model: QwQModel,
-    k_rules: List[str],
+    baai_model: BAAIModel,
     g_rule: str,
     graph_processor: GraphProcessor,
-    graph_reassembler: GraphReassembler
+    graph_reassembler: GraphReassembler,
+    multi_round: bool = True
 ) -> Dict[str, Any]:
     """
     Executes the full, unified, rich processing pipeline.
@@ -32,35 +34,29 @@ async def run_rich_pipeline(
     Args:
         text: The raw input text.
         qwq_model: An initialized QwQModel instance.
-        k_rules: A list of natural language rules for segmentation.
+        baai_model: An initialized BAAIModel instance for segmentation.
         g_rule: A natural language rule for reassembly.
         graph_processor: An initialized GraphProcessor instance.
         graph_reassembler: An initialized GraphReassembler instance.
+        multi_round: Whether to perform multi-round graph enrichment.
 
     Returns:
         A dictionary containing the final processing results.
     """
     logger.info("--- Starting Unified Rich Pipeline ---")
 
-    # 1. Disassembly Phase (Tape -> Segments) using the new LLM-driven PartitionManager
-    logger.info("Phase 1: Disassembly - Creating segments with LLM and K-Rules...")
-    partition_manager = PartitionManager(qwq_model=qwq_model, k_rules_by_round=k_rules)
-    optimal_segments = partition_manager.create_partitions(text)
-    logger.info(f"Disassembly complete. Produced {len(optimal_segments)} optimal segments.")
-    
-    # Save disassembly report
-    report_path = "disassembly_report.json"
-    with open(report_path, 'w') as f:
-        json.dump(partition_manager.get_segmentation_summary(), f, indent=2)
-    logger.info(f"Disassembly report saved to {report_path}")
+    # 1. Disassembly Phase: Create enriched segments
+    logger.info("Phase 1: Disassembly - Creating enriched segments...")
+    partition_manager = PartitionManager(embedding_model=baai_model)
+    enriched_segments = partition_manager.create_partitions(text)
+    logger.info(f"Disassembly complete. Produced {len(enriched_segments)} enriched segments.")
 
     # 2. Reassembly Phase (Segments -> Graph -> Output)
     logger.info("Phase 2: Reassembly - Building and enriching the graph...")
     
-    # The GraphProcessor will be enhanced to perform multi-round enrichment
     graph_data = await graph_processor.process(
-        segments=[{'content': s} for s in optimal_segments],
-        multi_round=True # This will be implemented next
+        segments=enriched_segments,
+        multi_round=multi_round
     )
     logger.info(f"Graph processing complete. Final graph has {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
 
@@ -68,8 +64,7 @@ async def run_rich_pipeline(
     final_output = graph_reassembler.reassemble(
         graph_data['nodes'],
         graph_data['edges'],
-        strategy="layered_assembly",
-        original_document=text
+        strategy=g_rule  # Use the g_rule for synthesis strategy
     )
     logger.info("Reassembly complete. Final output generated.")
     

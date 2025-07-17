@@ -52,74 +52,45 @@ class GraphProcessor:
             logger.warning("SentenceTransformers not installed. Text node condensation will be skipped.")
             return None
 
-    async def process(self, segments: List[Dict[str, Any]], multi_round: bool = False, rounds: int = 3) -> Dict[str, List[Dict]]:
+    async def process(self, segments: List[Any], multi_round: bool = False, rounds: int = 3) -> Dict[str, List[Dict]]:
         """
         Execute the full graph processing pipeline, with optional multi-round enrichment.
         """
         logger.info(f"Starting graph processing for {len(segments)} segments.")
-        segment_contents = [s['content'] for s in segments]
         
-        # Extract attention data before building the graph
-        attention_data = {}
-        if self.attention_extractor:
-            logger.info("Extracting attention data for graph construction...")
-            try:
-                # The extractor now returns a dictionary with the full attention data
-                response_data = await self.attention_extractor.extract_attention(segment_contents)
-                # We need to extract the actual attention list from the response
-                attention_data = response_data.get("attentions", [])
-            except Exception as e:
-                logger.error(f"Attention extraction failed: {e}. Proceeding without attention data.")
-                attention_data = {} # Ensure attention_data is a dict
+        # Initialize the KnowledgeGraphManager with the embedding model
+        kg_manager = KnowledgeGraphManager(embedding_model=self.embedding_model)
         
-        initial_graph = self.attention_graph_builder.build_from_attention(attention_data, segment_contents)
-        
-        nodes = initial_graph.get('nodes', [])
-        edges = initial_graph.get('edges', [])
+        # Build the initial graph from enriched segments
+        initial_graph = kg_manager.build_initial_graph(segments)
+        nodes = initial_graph['nodes']
+        edges = initial_graph['edges']
 
         if not nodes:
             logger.warning("No nodes were generated. Aborting graph processing.")
             return {'nodes': [], 'edges': []}
 
         if multi_round:
-            logger.info("--- Starting Multi-Round Graph Enrichment ---")
+            logger.info(f"--- Starting Multi-Round Graph Enrichment ({rounds} rounds) ---")
             for i in range(rounds):
                 logger.info(f"--- Enrichment Round {i+1}/{rounds} ---")
                 
-                # Re-initialize the manager with the updated graph in each round
-                kg_manager = KnowledgeGraphManager({"nodes": nodes, "edges": edges})
+                logger.info("Classifying nodes based on graph structure...")
+                nodes = kg_manager.classify_nodes({'nodes': nodes, 'edges': edges})
                 
-                # 1. Classify and condense in each round
-                logger.info("Classifying nodes...")
-                nodes = kg_manager.classify_nodes()
+                nodes_to_keep = [n for n in nodes if n.get('tag') != 'DELETE']
                 
-                logger.info("Condensing graph...")
-                nodes, edges = await kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
+                logger.info("Condensing graph by merging similar nodes...")
+                nodes, edges = await kg_manager.condense_graph(nodes_to_keep, edges, self.ollama_extractor)
                 
-                # 2. LLM-based enrichment (if available)
-                if hasattr(kg_manager, 'enrich_graph_with_llm') and self.ollama_extractor:
-                    logger.info("Enriching graph with LLM...")
-                    nodes, edges = kg_manager.enrich_graph_with_llm(nodes, edges, self.ollama_extractor)
-                
-                # Save intermediate graph if in debug mode
-                if self.config.get('debug', False):
-                    graph_path = f"graph_round_{i+1}.json"
-                    with open(graph_path, 'w') as f:
-                        import json
-                        json.dump({"nodes": nodes, "edges": edges}, f, indent=2)
-                    logger.info(f"Intermediate graph saved to {graph_path}")
+                logger.info(f"Round {i+1} complete. Nodes: {len(nodes)}, Edges: {len(edges)}")
 
             logger.info("--- Multi-Round Enrichment Complete ---")
-            # Final classification after all rounds
-            kg_manager = KnowledgeGraphManager({"nodes": nodes, "edges": edges})
-            nodes = kg_manager.classify_nodes()
         else:
             # Single-pass processing
-            logger.info("Classifying nodes...")
-            kg_manager = KnowledgeGraphManager({"nodes": nodes, "edges": edges})
-            nodes = kg_manager.classify_nodes()
-            logger.info("Condensing graph...")
-            nodes, edges = await kg_manager.condense_graph(nodes, edges, self.ollama_extractor, self.embedding_model)
+            nodes = kg_manager.classify_nodes({'nodes': nodes, 'edges': edges})
+            nodes_to_keep = [n for n in nodes if n.get('tag') != 'DELETE']
+            nodes, edges = await kg_manager.condense_graph(nodes_to_keep, edges, self.ollama_extractor)
 
         logger.info("Building final hierarchical structure...")
         hierarchical_nodes, tree_edges = self.hierarchical_builder.build_hierarchy(nodes, edges)

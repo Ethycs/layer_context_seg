@@ -369,3 +369,37 @@ Return only the single relationship type as a string (e.g., "explains").
         if response in valid_types:
             return response
         return "unknown"
+
+    def segment(self, rule: str, text_to_segment: str) -> list[str]:
+        """
+        Segments text based on a natural language rule using the model's generative capabilities.
+        """
+        self._lazy_load()
+        prompt = f"""
+        You are an expert text segmenter. Your task is to divide the following text into segments based on a specific rule.
+        Each new segment must start on a new line and be prefixed with '---'.
+
+        RULE: {rule}
+
+        TEXT TO SEGMENT:
+        ---
+        {text_to_segment}
+        ---
+        """
+        
+        response = self.generate(prompt, max_tokens=len(text_to_segment) * 2) # Ensure enough tokens for response
+        
+        # Process the response to extract segments
+        segments = []
+        # Split by the '---' marker and filter out any empty strings
+        raw_segments = response.split('---')
+        for seg in raw_segments:
+            cleaned_seg = seg.strip()
+            if cleaned_seg:
+                segments.append(cleaned_seg)
+        
+        # As a fallback, if no segments are found, return the original text as one segment
+        if not segments:
+            return [text_to_segment]
+            
+        return segments
