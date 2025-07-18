@@ -337,3 +337,14 @@ class BAAIModel:
             'vocab_size': self.model.config.vocab_size,
             'model_type': self.model.config.model_type
         }
+
+    def segment(self, rule: str, text_to_segment: str) -> List[str]:
+        """
+        Implements the Segmenter protocol by wrapping the segment_by_prompt method.
+        """
+        logger.info(f"BAAIModel segmenting with rule: {rule}")
+        # The segment_by_prompt method is the BAAIModel's way of handling this.
+        segments_with_metadata = self.segment_by_prompt(text_to_segment, rule)
+        
+        # Extract just the text content to conform to the protocol's return type
+        return [segment['text'] for segment in segments_with_metadata]

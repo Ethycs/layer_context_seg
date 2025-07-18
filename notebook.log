@@ -1,3 +1,4 @@
 INFO:__main__:Project root set to: /workspaces/layer_context_seg
 INFO:models.baai_model:Lazy loading BGE-EN-ICL model from bge-en-icl...
 INFO:models.baai_model:BGE-EN-ICL model loaded successfully onto GPU
+INFO:partitioning.partition_manager:Graph construction complete. Produced 404 final nodes.

@@ -29,7 +29,6 @@ from master_config import get_config
 # Import core modules
 from models.qwq_model import QwQModel
 from graph.graph_reassembler import GraphReassembler
-from graph.processor import GraphProcessor
 from rich_pipeline import run_rich_pipeline
 
 logging.basicConfig(level=logging.INFO)
@@ -56,8 +55,7 @@ class FullMasterProcessor:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.qwq_model = QwQModel(model_path, device)
         
-        # Initialize other components (they might not be needed for the pure LLM pipeline)
-        self.graph_processor = GraphProcessor(attention_extractor=self.qwq_model)
+        # Initialize graph reassembler
         self.graph_reassembler = GraphReassembler()
         
         logger.info("All components initialized.")
@@ -71,7 +69,6 @@ class FullMasterProcessor:
             qwq_model=self.qwq_model,
             k_rules=k_rules,
             g_rule=g_rule,
-            graph_processor=self.graph_processor,
             graph_reassembler=self.graph_reassembler
         )
         

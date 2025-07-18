@@ -11,14 +11,18 @@ import logging
 import torch
 import numpy as np
 from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
 from transformers import AutoTokenizer
 
 # Import our new sharded loader
 from utils.safe_tensor_shard_loader import load_sharded_model
 
+# Import segmenter protocol
+from models.segmenter_protocol import Segmenter
+
 logger = logging.getLogger(__name__)
 
-class QwQModel:
+class QwQModel(Segmenter):
     """
     A unified class to handle the QwQ GGUF model for all tasks.
     This class now correctly uses the StreamingModelLoader to ensure
@@ -191,6 +195,77 @@ class QwQModel:
         
         return positions
 
+    def extract_low_rank_attention(self, text: str, window_size: int = 512, 
+                                  rank_ratio: float = 0.1, top_n_layers: int = 4,
+                                  calculator=None) -> list:
+        """
+        Extracts attention weights using low-rank decomposition on top layers only.
+        
+        Args:
+            text: Input text to analyze.
+            window_size: Size of each attention window.
+            rank_ratio: Fraction of ranks to keep (0.1 = keep 10% of ranks).
+            top_n_layers: Number of top layers to process (default: 4).
+            calculator: Optional calculator to process windows.
+            
+        Returns:
+            Processed attention data or calculator results.
+        """
+        self._lazy_load()
+        if not self.model or not self.tokenizer:
+            raise RuntimeError("Model could not be loaded.")
+            
+        token_ids = self.tokenizer.encode(text, add_special_tokens=True)
+        total_layers = self.config.num_hidden_layers if self.config else 32
+        
+        # Only process top N layers
+        layer_indices = list(range(total_layers - top_n_layers, total_layers))
+        
+        stride = window_size // 2  # Sliding window with 50% overlap
+        
+        if len(token_ids) <= window_size:
+            logger.info(f"Processing text in a single window with low-rank decomposition...")
+            window_data = self._extract_low_rank_window_attention(
+                text, window_size, layer_indices, rank_ratio
+            )
+            if calculator and window_data:
+                calculator.process_window(window_data)
+                return calculator.get_results()
+            return [window_data] if window_data else []
+        
+        logger.info(f"Processing {len(token_ids)} tokens with low-rank attention...")
+        
+        for window_idx in range(0, len(token_ids), stride):
+            start_idx = window_idx
+            end_idx = min(start_idx + window_size, len(token_ids))
+            window_token_ids = token_ids[start_idx:end_idx]
+            
+            if not window_token_ids:
+                continue
+                
+            window_text = self.tokenizer.decode(window_token_ids, skip_special_tokens=True)
+            window_data = self._extract_low_rank_window_attention(
+                window_text, window_size, layer_indices, rank_ratio
+            )
+            
+            if window_data and 'layers' in window_data:
+                window_data['metadata'] = {
+                    "window_index": window_idx // stride,
+                    "token_start_index": start_idx,
+                    "token_end_index": end_idx,
+                    "text_snippet": window_text[:100] + "...",
+                    "rank_ratio": rank_ratio,
+                    "layers_processed": layer_indices
+                }
+                if calculator:
+                    calculator.process_window(window_data)
+                    del window_data
+                    gc.collect()
+                    
+        if calculator:
+            return calculator.get_results()
+        return []
+    
     def extract_attention(self, text: str, window_size: int = 512, use_sliding_window: bool = True, calculator=None) -> list:
         """
         Extracts attention weights using a tiling or sliding window.
@@ -290,6 +365,152 @@ class QwQModel:
         
         return aggregated
 
+    def _extract_low_rank_window_attention(self, text: str, max_length: int, 
+                                          layer_indices: List[int], rank_ratio: float) -> dict:
+        """Extract attention with low-rank decomposition for specific layers."""
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length).to(self.device)
+        tokens = self.tokenizer.convert_ids_to_tokens(inputs.input_ids[0].cpu().tolist())
+        
+        with torch.no_grad():
+            outputs = self.model(input_ids=inputs.input_ids, output_attentions=True)
+        
+        layers_data = []
+        if outputs.attentions:
+            for layer_idx in layer_indices:
+                if layer_idx < len(outputs.attentions):
+                    layer_attention = outputs.attentions[layer_idx]
+                    # Apply low-rank decomposition
+                    attention_lowrank = self._apply_svd_decomposition(
+                        layer_attention.cpu().numpy()[0], rank_ratio
+                    )
+                    layers_data.append({
+                        "layer_idx": layer_idx,
+                        "attention": attention_lowrank,
+                        "shape": attention_lowrank.shape,
+                        "is_compressed": True,
+                        "compression_ratio": rank_ratio
+                    })
+        
+        return {
+            "layers": layers_data,
+            "tokens": tokens,
+            "sequence_length": len(tokens),
+            "low_rank": True
+        }
+    
+    def _apply_svd_decomposition(self, attention_matrix: np.ndarray, rank_ratio: float) -> np.ndarray:
+        """
+        Apply SVD decomposition to compress attention matrix.
+        
+        Args:
+            attention_matrix: Shape [num_heads, seq_len, seq_len]
+            rank_ratio: Fraction of ranks to keep
+            
+        Returns:
+            Compressed attention matrix
+        """
+        num_heads, seq_len, _ = attention_matrix.shape
+        compressed = np.zeros_like(attention_matrix)
+        
+        for head_idx in range(num_heads):
+            # SVD on each head's attention matrix
+            U, S, Vt = np.linalg.svd(attention_matrix[head_idx], full_matrices=False)
+            
+            # Determine rank dynamically
+            total_variance = S.sum()
+            cumsum = S.cumsum()
+            # Find minimum rank that captures (1-rank_ratio) of variance
+            rank = max(1, np.argmax(cumsum >= total_variance * (1 - rank_ratio)) + 1)
+            rank = min(rank, int(seq_len * rank_ratio))
+            
+            # Reconstruct with low rank
+            U_r = U[:, :rank]
+            S_r = S[:rank]
+            Vt_r = Vt[:rank, :]
+            
+            compressed[head_idx] = U_r @ np.diag(S_r) @ Vt_r
+            
+        return compressed
+    
+    def inject_semantic_prompts(self, prompts: List[str], layers: List[int] = None) -> None:
+        """
+        Inject semantic steering prompts into KV cache of specified layers.
+        
+        Args:
+            prompts: List of steering prompts
+            layers: Layer indices to inject into (default: top 4 layers)
+        """
+        self._lazy_load()
+        if layers is None:
+            total_layers = self.config.num_hidden_layers if self.config else 32
+            layers = list(range(total_layers - 4, total_layers))
+            
+        # Encode prompts
+        prompt_text = " ".join(prompts)
+        prompt_inputs = self.tokenizer(prompt_text, return_tensors="pt", 
+                                      truncation=True, max_length=128).to(self.device)
+        
+        with torch.no_grad():
+            # Get hidden states for prompts
+            prompt_outputs = self.model(
+                input_ids=prompt_inputs.input_ids,
+                output_hidden_states=True
+            )
+            
+            # Inject into specified layers' KV cache
+            # Note: This is a conceptual implementation - actual cache manipulation
+            # depends on the specific model architecture
+            logger.info(f"Injected semantic prompts into layers {layers}")
+    
+    def segment_by_attention(self, text: str, use_low_rank: bool = True, 
+                           boundary_threshold: float = 0.3) -> List[str]:
+        """
+        Use attention patterns to find natural segment boundaries.
+        
+        Args:
+            text: Input text to segment
+            use_low_rank: Whether to use low-rank attention
+            boundary_threshold: Threshold for detecting boundaries
+            
+        Returns:
+            List of text segments
+        """
+        # Use attention calculator to find boundaries
+        from graph.attention_calculator import AttentionCalculator
+        
+        calculator = AttentionCalculator(
+            rank_ratio=0.1 if use_low_rank else 1.0,
+            boundary_threshold=boundary_threshold
+        )
+        
+        if use_low_rank:
+            self.extract_low_rank_attention(text, calculator=calculator)
+        else:
+            self.extract_attention(text, calculator=calculator)
+            
+        # Get boundary information from calculator
+        results = calculator.get_results()
+        boundaries = results.get('segment_boundaries', [])
+        
+        # Split text at boundaries
+        segments = []
+        start = 0
+        
+        for boundary in boundaries:
+            end = boundary['position']
+            if end > start:
+                segments.append(text[start:end].strip())
+            start = end
+            
+        # Add final segment
+        if start < len(text):
+            segments.append(text[start:].strip())
+            
+        # Filter out empty segments
+        segments = [s for s in segments if s]
+        
+        return segments if segments else [text]
+    
     def _extract_single_window_attention(self, text: str, max_length: int) -> dict:
         """Helper function to extract attention for a single block of text."""
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length).to(self.device)

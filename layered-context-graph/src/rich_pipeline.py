@@ -12,7 +12,6 @@ from typing import Dict, Any, List
 import json
 
 from partitioning.partition_manager import PartitionManager
-from graph.processor import GraphProcessor
 from synthesis.graph_reassembler import GraphReassembler
 from models.qwq_model import QwQModel
 from models.baai_model import BAAIModel
@@ -22,49 +21,71 @@ logger = logging.getLogger(__name__)
 async def run_rich_pipeline(
     text: str,
     qwq_model: QwQModel,
-    baai_model: BAAIModel,
+    k_rules: List[str],
     g_rule: str,
-    graph_processor: GraphProcessor,
-    graph_reassembler: GraphReassembler,
-    multi_round: bool = True
+    graph_processor=None,  # Deprecated parameter for compatibility
+    graph_reassembler: GraphReassembler = None
 ) -> Dict[str, Any]:
     """
     Executes the full, unified, rich processing pipeline.
 
     Args:
         text: The raw input text.
-        qwq_model: An initialized QwQModel instance.
-        baai_model: An initialized BAAIModel instance for segmentation.
+        qwq_model: An initialized QwQModel instance for segmentation and analysis.
+        k_rules: A list of natural language rules for segmentation.
         g_rule: A natural language rule for reassembly.
-        graph_processor: An initialized GraphProcessor instance.
-        graph_reassembler: An initialized GraphReassembler instance.
-        multi_round: Whether to perform multi-round graph enrichment.
+        graph_processor: Deprecated, kept for compatibility.
+        graph_reassembler: Optional GraphReassembler instance.
 
     Returns:
         A dictionary containing the final processing results.
     """
     logger.info("--- Starting Unified Rich Pipeline ---")
 
-    # 1. Disassembly Phase: Create enriched segments
-    logger.info("Phase 1: Disassembly - Creating enriched segments...")
-    partition_manager = PartitionManager(embedding_model=baai_model)
-    enriched_segments = partition_manager.create_partitions(text)
-    logger.info(f"Disassembly complete. Produced {len(enriched_segments)} enriched segments.")
-
-    # 2. Reassembly Phase (Segments -> Graph -> Output)
-    logger.info("Phase 2: Reassembly - Building and enriching the graph...")
+    # Initialize BAAI model for embeddings
+    from pathlib import Path
+    baai_model_path = Path('./bge-en-icl')  # Default path, should be configurable
+    baai_model = BAAIModel(str(baai_model_path))
     
-    graph_data = await graph_processor.process(
-        segments=enriched_segments,
-        multi_round=multi_round
-    )
-    logger.info(f"Graph processing complete. Final graph has {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
+    # 1. Use QwQ for attention-based segmentation if k_rules request it
+    use_attention_segmentation = any('attention' in rule.lower() for rule in k_rules)
+    
+    if use_attention_segmentation:
+        logger.info("Phase 1a: Using attention-based segmentation...")
+        segments = qwq_model.segment_by_attention(text, use_low_rank=True)
+        # Convert segments to dict format expected by PartitionManager
+        segment_dicts = []
+        current_pos = 0
+        for seg_text in segments:
+            segment_dicts.append({'content': seg_text, 'start': current_pos})
+            current_pos += len(seg_text)
+    else:
+        segment_dicts = None
+    
+    # 2. Create partition graph
+    logger.info("Phase 1b: Creating partition graph...")
+    partition_manager = PartitionManager(embedding_model=baai_model)
+    
+    if segment_dicts:
+        # Use pre-segmented text
+        graph = partition_manager._build_graph(segment_dicts)
+        nodes, edges = partition_manager._build_hierarchy(graph)
+        nodes = partition_manager._classify_nodes(nodes, edges)
+        graph_data = {'nodes': nodes, 'edges': edges}
+    else:
+        # Use default segmentation
+        graph_data = partition_manager.create_partition_graph(text)
+    
+    logger.info(f"Graph construction complete. Produced {len(graph_data['nodes'])} nodes.")
 
-    # Reassemble the final document from the enriched graph
+    # 3. Reassembly Phase
+    logger.info("Phase 2: Reassembling document...")
+    if graph_reassembler is None:
+        graph_reassembler = GraphReassembler()
     final_output = graph_reassembler.reassemble(
         graph_data['nodes'],
         graph_data['edges'],
-        strategy=g_rule  # Use the g_rule for synthesis strategy
+        strategy=g_rule
     )
     logger.info("Reassembly complete. Final output generated.")
     
