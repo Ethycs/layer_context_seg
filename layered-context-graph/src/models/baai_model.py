@@ -13,13 +13,14 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Union, Optional
 from transformers import AutoTokenizer, AutoModel
+from .segmenter_protocol import Segmenter
 
 # Import the sharded loader for memory-efficient loading
 from utils.safe_tensor_shard_loader import load_sharded_model
 
 logger = logging.getLogger(__name__)
 
-class BAAIModel:
+class BAAIModel(Segmenter):
     """
     A class to handle the BGE-EN-ICL model for embeddings and segmentation.
     Uses lazy loading with direct-to-GPU loading for memory efficiency.

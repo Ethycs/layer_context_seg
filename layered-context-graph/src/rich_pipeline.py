@@ -1,103 +1,83 @@
-#!/usr/bin/env python3
-"""
-Unified Rich Processing Pipeline
-================================
-This module defines the single, "as-rich-as-possible" pipeline for the
-Tape -> Tree -> Graph transformation. It orchestrates the Disassembly and
-Reassembly phases to produce a high-quality, structured output.
-"""
-
 import logging
-from typing import Dict, Any, List
 import json
-
+from pathlib import Path
+import networkx as nx
 from partitioning.partition_manager import PartitionManager
-from synthesis.graph_reassembler import GraphReassembler
-from models.qwq_model import QwQModel
-from models.baai_model import BAAIModel
 
+# --- Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+RESULTS_DIR = Path('./results')
+RESULTS_DIR.mkdir(exist_ok=True)
 
-async def run_rich_pipeline(
-    text: str,
-    qwq_model: QwQModel,
-    k_rules: List[str],
-    g_rule: str,
-    graph_processor=None,  # Deprecated parameter for compatibility
-    graph_reassembler: GraphReassembler = None
-) -> Dict[str, Any]:
+def run_rich_pipeline(text: str, k_rules: list, reassembly_prompt: str, output_key: str):
     """
-    Executes the full, unified, rich processing pipeline.
-
-    Args:
-        text: The raw input text.
-        qwq_model: An initialized QwQModel instance for segmentation and analysis.
-        k_rules: A list of natural language rules for segmentation.
-        g_rule: A natural language rule for reassembly.
-        graph_processor: Deprecated, kept for compatibility.
-        graph_reassembler: Optional GraphReassembler instance.
-
-    Returns:
-        A dictionary containing the final processing results.
+    Executes the full, stateful pipeline using the PartitionManager.
     """
-    logger.info("--- Starting Unified Rich Pipeline ---")
+    logger.info("--- Starting Rich Pipeline ---")
 
-    # Initialize BAAI model for embeddings
-    from pathlib import Path
-    baai_model_path = Path('./bge-en-icl')  # Default path, should be configurable
-    baai_model = BAAIModel(str(baai_model_path))
-    
-    # 1. Use QwQ for attention-based segmentation if k_rules request it
-    use_attention_segmentation = any('attention' in rule.lower() for rule in k_rules)
-    
-    if use_attention_segmentation:
-        logger.info("Phase 1a: Using attention-based segmentation...")
-        segments = qwq_model.segment_by_attention(text, use_low_rank=True)
-        # Convert segments to dict format expected by PartitionManager
-        segment_dicts = []
-        current_pos = 0
-        for seg_text in segments:
-            segment_dicts.append({'content': seg_text, 'start': current_pos})
-            current_pos += len(seg_text)
-    else:
-        segment_dicts = None
-    
-    # 2. Create partition graph
-    logger.info("Phase 1b: Creating partition graph...")
-    partition_manager = PartitionManager(embedding_model=baai_model)
-    
-    if segment_dicts:
-        # Use pre-segmented text
-        graph = partition_manager._build_graph(segment_dicts)
-        nodes, edges = partition_manager._build_hierarchy(graph)
-        nodes = partition_manager._classify_nodes(nodes, edges)
-        graph_data = {'nodes': nodes, 'edges': edges}
-    else:
-        # Use default segmentation
-        graph_data = partition_manager.create_partition_graph(text)
-    
-    logger.info(f"Graph construction complete. Produced {len(graph_data['nodes'])} nodes.")
+    # 1. Instantiate the manager. Models will be lazy-loaded inside it.
+    manager = PartitionManager()
 
-    # 3. Reassembly Phase
-    logger.info("Phase 2: Reassembling document...")
-    if graph_reassembler is None:
-        graph_reassembler = GraphReassembler()
-    final_output = graph_reassembler.reassemble(
-        graph_data['nodes'],
-        graph_data['edges'],
-        strategy=g_rule
+    # 2. Partition the text into a hierarchical graph.
+    logger.info("Phase 1: Partitioning...")
+    manager.partition(text, k_rules)
+
+    # 3. Classify the nodes in the graph.
+    logger.info("Phase 2: Classifying nodes...")
+    manager.classify()
+
+    # 4. Reassemble the graph into a new text format.
+    logger.info("Phase 3: Reassembling text...")
+    reassembled_text = manager.reassemble(reassembly_prompt, key=output_key)
+
+    # 5. Save the outputs.
+    logger.info("Phase 4: Saving results...")
+    
+    # Save graph to a JSON format (GraphML for structure, JSON for node data)
+    graph_path = RESULTS_DIR / f"{output_key}_graph.json"
+    graph_data = nx.node_link_data(manager.graph)
+    # Convert EnrichedSegment objects to dictionaries for serialization
+    for node in graph_data['nodes']:
+        node['segment'] = node['segment'].__dict__
+    with open(graph_path, 'w') as f:
+        json.dump(graph_data, f, indent=2)
+    logger.info(f"Graph saved to {graph_path}")
+
+    # Save reassembled text
+    text_path = RESULTS_DIR / f"{output_key}_reassembled.txt"
+    with open(text_path, 'w') as f:
+        f.write(reassembled_text)
+    logger.info(f"Reassembled text saved to {text_path}")
+
+    logger.info("--- Rich Pipeline Finished ---")
+    return graph_data, reassembled_text
+
+if __name__ == '__main__':
+    # This is the main entry point for running the pipeline from the command line.
+    
+    # Load the source text
+    source_text_path = Path('./demo_content/physics_paper.txt')
+    if not source_text_path.exists():
+        raise FileNotFoundError(f"Source text not found at {source_text_path}")
+    with open(source_text_path, 'r') as f:
+        source_text = f.read()
+
+    # Define the K-Rules for segmentation
+    segmentation_rules = [
+        "Split the document into its major sections like Introduction, Main Body, and Conclusion.",
+        "Break down each section into paragraphs.",
+        "Isolate code blocks and mathematical formulas.",
+        "Divide long paragraphs into individual sentences."
+    ]
+
+    # Define the prompt for the final reassembly
+    synthesis_prompt = "Create a concise, easy-to-read summary of the key findings from the provided text."
+
+    # Run the pipeline
+    run_rich_pipeline(
+        text=source_text,
+        k_rules=segmentation_rules,
+        reassembly_prompt=synthesis_prompt,
+        output_key='physics_summary'
     )
-    logger.info("Reassembly complete. Final output generated.")
-    
-    logger.info("--- Unified Rich Pipeline Finished ---")
-
-    return {
-        'input_length': len(text),
-        'nodes': len(graph_data['nodes']),
-        'edges': len(graph_data['edges']),
-        'output': final_output,
-        'metadata': {
-            'pipeline': 'unified_rich_pipeline',
-            'architecture': 'Tape-Tree-Graph'
-        }
-    }
