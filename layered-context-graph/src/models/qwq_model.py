@@ -610,39 +610,46 @@ Return only the single relationship type as a string (e.g., "explains").
             return response
         return "unknown"
 
-    def segment(self, rule: str, text_to_segment: str) -> list[str]:
+    def segment(self, rule: str, text_to_segment: str, chunk_size: int = 1024) -> list[str]:
         """
         Segments text based on a natural language rule using the model's generative capabilities.
+        Handles large texts by chunking them.
         """
         self._lazy_load()
-        prompt = f"""
-        You are an expert text segmenter. Your task is to divide the following text into segments based on a specific rule.
-        Each new segment must start on a new line and be prefixed with '---'.
-
-        RULE: {rule}
-
-        TEXT TO SEGMENT:
-        ---
-        {text_to_segment}
-        ---
-        """
         
-        response = self.generate(prompt, max_tokens=len(text_to_segment) * 2) # Ensure enough tokens for response
-        
-        # Process the response to extract segments
-        segments = []
-        # Split by the '---' marker and filter out any empty strings
-        raw_segments = response.split('---')
-        for seg in raw_segments:
-            cleaned_seg = seg.strip()
-            if cleaned_seg:
-                segments.append(cleaned_seg)
-        
-        # As a fallback, if no segments are found, return the original text as one segment
-        if not segments:
-            return [text_to_segment]
+        # If text is smaller than chunk size, process directly
+        if len(text_to_segment) < chunk_size:
+            prompt = f"Based on the rule '{rule}', segment the following text by inserting '---' between segments:\n\n{text_to_segment}"
+            response = self.generate(prompt, max_tokens=2048)
             
-        return segments
+            if text_to_segment in response:
+                response = response.split(text_to_segment)[-1]
+
+            segments = [s.strip() for s in response.split('---') if s.strip()]
+            
+            if not segments or (len(segments) == 1 and segments[0] == text_to_segment):
+                return [text_to_segment]
+            return segments
+
+        # Chunking for large texts
+        all_segments = []
+        text_chunks = [text_to_segment[i:i+chunk_size] for i in range(0, len(text_to_segment), chunk_size)]
+        
+        for chunk in text_chunks:
+            prompt = f"Based on the rule '{rule}', segment the following text by inserting '---' between segments:\n\n{chunk}"
+            response = self.generate(prompt, max_tokens=2048)
+            
+            if chunk in response:
+                response = response.split(chunk)[-1]
+            
+            chunk_segments = [s.strip() for s in response.split('---') if s.strip()]
+            
+            if not chunk_segments or (len(chunk_segments) == 1 and chunk_segments[0] == chunk):
+                all_segments.append(chunk)
+            else:
+                all_segments.extend(chunk_segments)
+                
+        return all_segments
 
     def extract_graph_aware_attention(self, text: str, adjacency_matrix: np.ndarray = None,
                                  edge_types: np.ndarray = None, window_size: int = 512,

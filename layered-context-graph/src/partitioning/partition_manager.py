@@ -76,28 +76,23 @@ class PartitionManager:
             # If no new children were created, the parent remains a leaf for the next level.
             self.processing_queue.append(parent_id)
 
-    def add_semantic_edges(self, embedding_model: BAAIModel):
+    def get_all_segments_for_embedding(self) -> List[Dict[str, str]]:
         """
-        Adds semantic similarity edges to the graph using a provided embedding model.
+        Dispenses all segments for the embedding process.
         """
-        if len(self.segments) < 2:
-            return
+        return [{'id': seg.id, 'content': seg.content} for seg in self.segments.values()]
 
-        all_segments = list(self.segments.values())
-        contents = [seg.content for seg in all_segments]
-        embeddings = embedding_model.encode(contents, batch_size=32)
-        
-        for i in range(len(all_segments)):
-            for j in range(i + 1, len(all_segments)):
-                similarity = np.dot(embeddings[i], embeddings[j])
-                if similarity > self.similarity_threshold:
-                    self.graph.add_edge(
-                        all_segments[i].id, 
-                        all_segments[j].id, 
-                        type='semantic_similarity',
-                        weight=float(similarity)
-                    )
-        logger.info("Semantic edge addition complete.")
+    def add_edges_from_similarity(self, source_id: str, target_id: str, similarity: float):
+        """
+        Receives a similarity score and adds an edge if it meets the threshold.
+        """
+        if similarity > self.similarity_threshold:
+            self.graph.add_edge(
+                source_id, 
+                target_id, 
+                type='semantic_similarity',
+                weight=float(similarity)
+            )
 
     def classify(self):
         """Classifies nodes as KEEP, DELETE, or TRACK based on content and importance."""

@@ -1,10 +1,8 @@
-2025-07-18 19:54:52,937 - INFO - Project root set to: /workspaces/layer_context_seg
-2025-07-18 19:54:57,860 - INFO - Graph initialized with root node 4ae0aaca-e5ca-4300-8e4e-2ff5a9b7c6a3.
-2025-07-18 19:54:57,860 - INFO - Dispensing 1 leaf nodes for processing.
-2025-07-18 19:54:57,860 - INFO - DisINFO:__main__:Project root set to: /workspaces/layer_context_seg
+INFO:__main__:Project root set to: /workspaces/layer_context_seg
+INFO:partitioning.partition_manager:Graph initialized with root node f74372a1-5b67-4a36-9c7c-54e04cd1dd60.
+INFO:partitioning.partition_manager:Dispensing 1 leaf nodes for processing.
+INFO:models.baai_model:BAAIModel segmenting with rule: Split into paragraphs.
 INFO:models.baai_model:Lazy loading BGE-EN-ICL model from bge-en-icl...
 INFO:models.baai_model:BGE-EN-ICL model loaded successfully onto GPU
-INFO:partitioning.partition_manager:Graph construction complete. Produced 404 final nodes.
- from QwQ_LCoT_7B_Instruct using sharded loader...
-2025-07-18 19:55:31,594 - INFO - Model is fully loaded onto GPU and ready.
-2025-07-18 19:57:31,250 - INFO - Reassembly for 'summary' complete.
+INFO:partitioning.partition_manager:Added 30 children to parent f74372a1-5b67-4a36-9c7c-54e04cd1dd60.
+INFO:partitioning.partition_manager:Node classification complete.

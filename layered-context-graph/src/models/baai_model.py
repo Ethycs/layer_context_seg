@@ -63,63 +63,48 @@ class BAAIModel(Segmenter):
             logger.info("BGE-EN-ICL model loaded successfully onto GPU")
     
     def encode(self, texts: Union[str, List[str]], batch_size: int = 8, 
-               normalize_embeddings: bool = True, show_progress: bool = False) -> np.ndarray:
+               normalize_embeddings: bool = True, show_progress: bool = False, chunk_size: int = 512) -> np.ndarray:
         """
         Encode texts into embeddings using last-token pooling.
-        
-        Args:
-            texts: Single text or list of texts to encode
-            batch_size: Batch size for encoding
-            normalize_embeddings: Whether to normalize embeddings
-            show_progress: Whether to show progress bar
-            
-        Returns:
-            Embeddings as numpy array
+        Handles large texts by chunking them.
         """
         self._lazy_load()
         
-        # Convert single text to list
         if isinstance(texts, str):
             texts = [texts]
         
         all_embeddings = []
         
-        # Process in batches
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
             
-            # Tokenize
             inputs = self.tokenizer(
                 batch_texts,
                 padding=True,
                 truncation=True,
-                max_length=self.max_length,
+                max_length=chunk_size,
                 return_tensors='pt'
             ).to(self.device)
             
-            # Get embeddings
             with torch.no_grad():
                 outputs = self.model(**inputs)
-                # Use last hidden state
                 hidden_states = outputs.last_hidden_state
-                
-                # Last-token pooling (as configured in BGE-EN-ICL)
-                # Get the last token position for each sequence
                 sequence_lengths = inputs.attention_mask.sum(dim=1) - 1
-                batch_size = hidden_states.shape[0]
+                batch_size_actual = hidden_states.shape[0]
                 
-                # Extract last token embeddings
-                embeddings = hidden_states[range(batch_size), sequence_lengths]
+                embeddings = hidden_states[range(batch_size_actual), sequence_lengths]
                 
                 if normalize_embeddings:
                     embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
                 
                 all_embeddings.append(embeddings.cpu().numpy())
         
-        # Concatenate all embeddings
+        if not all_embeddings:
+            return np.array([])
+
         embeddings = np.vstack(all_embeddings)
         
-        return embeddings if len(texts) > 1 else embeddings[0]
+        return embeddings
     
     def compute_similarity(self, text1: str, text2: str) -> float:
         """
@@ -341,11 +326,19 @@ class BAAIModel(Segmenter):
 
     def segment(self, rule: str, text_to_segment: str) -> List[str]:
         """
-        Implements the Segmenter protocol by wrapping the segment_by_prompt method.
+        Implements the Segmenter protocol by wrapping the find_semantic_boundaries method.
         """
         logger.info(f"BAAIModel segmenting with rule: {rule}")
-        # The segment_by_prompt method is the BAAIModel's way of handling this.
-        segments_with_metadata = self.segment_by_prompt(text_to_segment, rule)
+        boundaries = self.find_semantic_boundaries(text_to_segment)
         
-        # Extract just the text content to conform to the protocol's return type
-        return [segment['text'] for segment in segments_with_metadata]
+        if not boundaries:
+            return [text_to_segment]
+            
+        segments = []
+        start = 0
+        for end in boundaries:
+            segments.append(text_to_segment[start:end])
+            start = end
+        segments.append(text_to_segment[start:])
+        
+        return segments
