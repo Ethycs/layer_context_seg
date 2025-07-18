@@ -427,3 +427,87 @@ class AttentionCalculator:
                 coherences.append(pattern['pattern']['cross_layer_coherence'])
         
         return float(np.mean(coherences)) if coherences else 1.0
+
+    def _construct_attention_graph(self, attention_matrix: np.ndarray, 
+                                 threshold: float = 0.1) -> Tuple[np.ndarray, List[Dict]]:
+        """
+        Construct a graph from attention patterns.
+        
+        Args:
+            attention_matrix: Averaged attention weights [seq_len, seq_len]
+            threshold: Minimum attention weight to create an edge
+            
+        Returns:
+            Tuple of (adjacency_matrix, edge_list)
+        """
+        seq_len = attention_matrix.shape[0]
+        adjacency = np.zeros((seq_len, seq_len))
+        edge_list = []
+        
+        for i in range(seq_len):
+            for j in range(seq_len):
+                if attention_matrix[i, j] > threshold:
+                    adjacency[i, j] = 1
+                    edge_list.append({
+                        'from': i,
+                        'to': j,
+                        'weight': float(attention_matrix[i, j])
+                    })
+        
+        return adjacency, edge_list
+
+    def process_graph_aware_window(self, window_data: Dict[str, Any]) -> None:
+        """
+        Process a window with graph-aware attention data.
+        
+        Args:
+            window_data: Window data with graph constraints
+        """
+        # First run standard processing
+        self.process_window(window_data)
+        
+        if window_data.get('graph_aware', False):
+            # Extract graph structure from attention
+            for layer in window_data['layers']:
+                if layer.get('is_graph_constrained'):
+                    attention = layer['attention']
+                    # Average across heads if needed
+                    if len(attention.shape) > 2:
+                        attention = attention.mean(axis=0)
+                    
+                    adjacency, edges = self._construct_attention_graph(attention)
+                    
+                    # Store graph metrics
+                    if 'graph_metrics' not in self.window_boundaries[0]:
+                        self.window_boundaries[0]['graph_metrics'] = []
+                    
+                    self.window_boundaries[0]['graph_metrics'].append({
+                        'layer_idx': layer['layer_idx'],
+                        'num_edges': len(edges),
+                        'graph_density': adjacency.mean(),
+                        'strongest_connections': sorted(edges, 
+                                                      key=lambda x: x['weight'], 
+                                                      reverse=True)[:5]
+                    })
+
+    def get_graph_results(self) -> Dict[str, Any]:
+        """
+        Get graph-specific results from processed windows.
+        """
+        results = self.get_results()
+        
+        # Add graph-specific analysis
+        if hasattr(self, 'window_boundaries') and self.window_boundaries:
+            graph_data = []
+            for window in self.window_boundaries:
+                if 'graph_metrics' in window:
+                    graph_data.extend(window['graph_metrics'])
+            
+            if graph_data:
+                results['graph_analysis'] = {
+                    'average_density': np.mean([g['graph_density'] for g in graph_data]),
+                    'total_edges': sum(g['num_edges'] for g in graph_data),
+                    'layer_statistics': self._compute_layer_graph_stats(graph_data)
+                }
+        
+        return results

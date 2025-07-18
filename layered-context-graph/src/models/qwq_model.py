@@ -624,3 +624,131 @@ Return only the single relationship type as a string (e.g., "explains").
             return [text_to_segment]
             
         return segments
+
+    def extract_graph_aware_attention(self, text: str, adjacency_matrix: np.ndarray = None,
+                                 edge_types: np.ndarray = None, window_size: int = 512,
+                                 rank_ratio: float = 0.1, top_n_layers: int = 4,
+                                 calculator=None) -> list:
+        """
+        Extract attention weights with graph constraints and type awareness.
+        
+        Args:
+            text: Input text to analyze
+            adjacency_matrix: Optional graph adjacency matrix
+            edge_types: Optional edge type matrix
+            window_size: Size of each attention window
+            rank_ratio: Fraction of ranks to keep
+            top_n_layers: Number of top layers to process
+            calculator: Optional calculator to process windows
+            
+        Returns:
+            Processed attention data or calculator results
+        """
+        self._lazy_load()
+        if not self.model or not self.tokenizer:
+            raise RuntimeError("Model could not be loaded.")
+            
+        # Import graph-aware attention if not already loaded
+        if not hasattr(self, 'graph_attention'):
+            from graph.graph_aware_attention import GraphAwareAttention
+            # Get model config
+            d_model = self.config.hidden_size
+            n_heads = self.config.num_attention_heads
+            self.graph_attention = GraphAwareAttention(d_model, n_heads)
+            
+        token_ids = self.tokenizer.encode(text, add_special_tokens=True)
+        total_layers = self.config.num_hidden_layers if self.config else 32
+        
+        # Only process top N layers
+        layer_indices = list(range(total_layers - top_n_layers, total_layers))
+        
+        stride = window_size // 2
+        
+        # Convert numpy arrays to torch tensors if provided
+        if adjacency_matrix is not None:
+            adjacency_matrix = torch.from_numpy(adjacency_matrix).float()
+        if edge_types is not None:
+            edge_types = torch.from_numpy(edge_types).long()
+        
+        # Process windows
+        for window_idx in range(0, len(token_ids), stride):
+            start_idx = window_idx
+            end_idx = min(start_idx + window_size, len(token_ids))
+            window_token_ids = token_ids[start_idx:end_idx]
+            
+            if not window_token_ids:
+                continue
+                
+            window_text = self.tokenizer.decode(window_token_ids, skip_special_tokens=True)
+            
+            # Extract window adjacency if full adjacency provided
+            window_adj = None
+            window_types = None
+            if adjacency_matrix is not None:
+                window_adj = adjacency_matrix[start_idx:end_idx, start_idx:end_idx]
+            if edge_types is not None:
+                window_types = edge_types[start_idx:end_idx, start_idx:end_idx]
+                
+            window_data = self._extract_graph_aware_window_attention(
+                window_text, window_size, layer_indices, rank_ratio,
+                window_adj, window_types
+            )
+            
+            if window_data and 'layers' in window_data:
+                window_data['metadata'] = {
+                    "window_index": window_idx // stride,
+                    "token_start_index": start_idx,
+                    "token_end_index": end_idx,
+                    "text_snippet": window_text[:100] + "...",
+                    "rank_ratio": rank_ratio,
+                    "layers_processed": layer_indices,
+                    "has_graph_constraints": adjacency_matrix is not None
+                }
+                if calculator:
+                    calculator.process_window(window_data)
+                    del window_data
+                    gc.collect()
+                    
+        if calculator:
+            return calculator.get_results()
+        return []
+
+    def _extract_graph_aware_window_attention(self, text: str, max_length: int,
+                                            layer_indices: List[int], rank_ratio: float,
+                                            adjacency: torch.Tensor = None,
+                                            edge_types: torch.Tensor = None) -> dict:
+        """Extract attention with graph constraints for specific layers."""
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, 
+                               max_length=max_length).to(self.device)
+        tokens = self.tokenizer.convert_ids_to_tokens(inputs.input_ids[0].cpu().tolist())
+        
+        with torch.no_grad():
+            # Get hidden states from model
+            outputs = self.model(input_ids=inputs.input_ids, output_hidden_states=True)
+            hidden_states = outputs.hidden_states
+            
+        layers_data = []
+        for layer_idx in layer_indices:
+            if layer_idx < len(hidden_states):
+                layer_hidden = hidden_states[layer_idx]
+                
+                # Apply graph-aware attention
+                _, attention_weights = self.graph_attention(
+                    layer_hidden, layer_hidden, layer_hidden,
+                    adjacency, edge_types, rank_ratio
+                )
+                
+                layers_data.append({
+                    "layer_idx": layer_idx,
+                    "attention": attention_weights.cpu().numpy(),
+                    "shape": attention_weights.shape,
+                    "is_graph_constrained": adjacency is not None,
+                    "has_type_bias": edge_types is not None
+                })
+        
+        return {
+            "layers": layers_data,
+            "tokens": tokens,
+            "sequence_length": len(tokens),
+            "graph_aware": True
+        }
