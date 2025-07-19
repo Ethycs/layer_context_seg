@@ -16,7 +16,6 @@ class EnrichedSegment:
     children: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-@dataclass
 class EdgeType(Enum):
     """Types of relationships between segments."""
     NO_RELATION = 0
@@ -32,11 +31,17 @@ class EdgeType(Enum):
 
 @dataclass
 class GraphAwareSegment(EnrichedSegment):
-    """Segment with graph-aware properties."""
+    """Segment with graph-aware properties and GAP enhancements."""
     incoming_edges: List[Tuple[str, EdgeType]] = field(default_factory=list)
     outgoing_edges: List[Tuple[str, EdgeType]] = field(default_factory=list)
     attention_density: float = 0.0
     type_distribution: Dict[EdgeType, int] = field(default_factory=dict)
+    
+    # GAP-specific fields
+    cohesion_score: float = 0.0
+    node_attention_strength: float = 0.0
+    is_hub_node: bool = False
+    dual_level_boundaries: List[int] = field(default_factory=list)
     
     def add_incoming_edge(self, from_id: str, edge_type: EdgeType):
         """Add an incoming edge with type."""
@@ -73,3 +78,38 @@ class TypeEmbedding:
             edge_type: cls(edge_type, value) 
             for edge_type, value in default_values.items()
         }
+
+
+@dataclass
+class GAPAnalysisResult:
+    """Results from GAP dual-level analysis."""
+    segment_id: str
+    token_attention_entropy: float = 0.0
+    node_attention_patterns: Dict[str, Any] = field(default_factory=dict)
+    cross_level_consistency: float = 0.0
+    detected_boundaries: List[Dict[str, Any]] = field(default_factory=list)
+    
+    def add_boundary(self, position: int, strength: float, boundary_type: str):
+        """Add a detected boundary."""
+        self.detected_boundaries.append({
+            'position': position,
+            'strength': strength,
+            'type': boundary_type
+        })
+
+
+@dataclass 
+class DualLevelEdge:
+    """Edge with both token and node-level attention information."""
+    source_id: str
+    target_id: str
+    edge_type: EdgeType
+    weight: float
+    token_level_attention: float = 0.0
+    node_level_attention: float = 0.0
+    cross_level_agreement: float = 0.0
+    
+    @property
+    def combined_strength(self) -> float:
+        """Compute combined strength from both levels."""
+        return (self.weight + self.token_level_attention + self.node_level_attention) / 3.0

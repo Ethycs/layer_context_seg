@@ -428,6 +428,22 @@ class QwQModel(Segmenter):
         Returns:
             Compressed attention matrix
         """
+        # Use optimized LowRankAttention if available
+        if hasattr(self, 'low_rank_attn') and self.low_rank_attn is not None:
+            # Convert numpy to torch tensor
+            attention_tensor = torch.from_numpy(attention_matrix).float().to(self.device)
+            
+            # Add batch dimension
+            attention_tensor = attention_tensor.unsqueeze(0)  # [1, num_heads, seq_len, seq_len]
+            
+            # Use the optimized batch SVD from LowRankAttention
+            with torch.no_grad():
+                compressed_tensor = self.low_rank_attn._apply_batch_svd(attention_tensor, rank_ratio)
+            
+            # Convert back to numpy and remove batch dimension
+            return compressed_tensor.squeeze(0).cpu().numpy()
+        
+        # Fallback to original implementation if optimized module not available
         num_heads, seq_len, _ = attention_matrix.shape
         compressed = np.zeros_like(attention_matrix)
         
@@ -814,7 +830,8 @@ Return only the single relationship type as a string (e.g., "explains").
                                    window_size: int = 512,
                                    rank_ratio: float = 0.1,
                                    top_n_layers: int = 4,
-                                   calculator=None) -> List[Dict[str, Any]]:
+                                   calculator=None,
+                                   fast_mode: bool = False) -> List[Dict[str, Any]]:
         """
         Extract attention with dual-level (token and node) processing.
         
@@ -855,15 +872,43 @@ Return only the single relationship type as a string (e.g., "explains").
         # Process in windows
         stride = window_size // 2
         total_layers = self.config.num_hidden_layers
+        
+        # Fast mode adjustments
+        if fast_mode:
+            # Use fewer layers and larger stride
+            top_n_layers = min(2, top_n_layers)
+            stride = int(window_size * 0.75)  # 25% overlap instead of 50%
+            rank_ratio = min(0.2, rank_ratio * 2)  # Use higher rank ratio
+        
         layer_indices = list(range(total_layers - top_n_layers, total_layers))
         
         window_processor = WindowedDualLevelProcessor(window_size, stride)
         results = []
         
-        for window_idx in range(0, len(token_ids), stride):
-            start_idx = window_idx
-            end_idx = min(start_idx + window_size, len(token_ids))
-            window_token_ids = token_ids[start_idx:end_idx]
+        # Determine batch size based on available memory
+        if hasattr(self, 'batch_size'):
+            batch_size = self.batch_size
+        else:
+            # Estimate based on GPU memory if available
+            if self.device.type == 'cuda':
+                gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+                # Conservative estimate: 1 window per 4GB for 32B model
+                batch_size = max(1, int(gpu_memory_gb / 4))
+            else:
+                batch_size = 1
+        
+        # Collect windows for batch processing
+        window_indices = list(range(0, len(token_ids), stride))
+        
+        for batch_start in range(0, len(window_indices), batch_size):
+            batch_end = min(batch_start + batch_size, len(window_indices))
+            batch_windows = window_indices[batch_start:batch_end]
+            
+            # Process batch of windows in parallel
+            for window_idx in batch_windows:
+                start_idx = window_idx
+                end_idx = min(start_idx + window_size, len(token_ids))
+                window_token_ids = token_ids[start_idx:end_idx]
             
             if not window_token_ids:
                 continue
@@ -950,14 +995,26 @@ Return only the single relationship type as a string (e.g., "explains").
                 
                 # Apply rank compression to attention weights
                 if rank_ratio < 1.0:
+                    # Use adaptive rank if selector is available
+                    if hasattr(self, 'rank_selector') and self.rank_selector is not None:
+                        # Compute optimal rank for this window
+                        token_attn_np = dual_output['token_attention'].cpu().numpy()
+                        optimal_rank_ratio = self.rank_selector.compute_optimal_rank(
+                            token_attn_np.mean(axis=0),  # Average across heads
+                            target_compression=0.9
+                        ) / token_attn_np.shape[-1]
+                        actual_rank_ratio = min(rank_ratio, optimal_rank_ratio)
+                    else:
+                        actual_rank_ratio = rank_ratio
+                    
                     token_attn = self._apply_svd_decomposition(
                         dual_output['token_attention'].cpu().numpy(),
-                        rank_ratio
+                        actual_rank_ratio
                     )
                     if dual_output['node_attention'] is not None:
                         node_attn = self._apply_svd_decomposition(
                             dual_output['node_attention'].cpu().numpy(),
-                            rank_ratio
+                            actual_rank_ratio
                         )
                     else:
                         node_attn = None

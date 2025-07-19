@@ -329,6 +329,12 @@ class BAAIModel(Segmenter):
         Implements the Segmenter protocol by wrapping the find_semantic_boundaries method.
         """
         logger.info(f"BAAIModel segmenting with rule: {rule}")
+        
+        # Special handling for code block isolation
+        if "code block" in rule.lower() or "isolate code" in rule.lower():
+            return self._isolate_code_blocks(text_to_segment)
+        
+        # Default semantic boundary finding
         boundaries = self.find_semantic_boundaries(text_to_segment)
         
         if not boundaries:
@@ -341,4 +347,62 @@ class BAAIModel(Segmenter):
             start = end
         segments.append(text_to_segment[start:])
         
+        return segments
+    
+    def _isolate_code_blocks(self, text: str) -> List[str]:
+        """
+        Isolate code blocks as atomic units along with their related text.
+        Code blocks are never segmented further.
+        
+        Returns segments where:
+        - Code blocks are kept as single segments
+        - Related explanatory text is kept as separate segments
+        - The relationship between text and code will be marked with 'explains' edges
+        """
+        import re
+        
+        segments = []
+        
+        # Pattern to match code blocks (```...``` or indented blocks)
+        code_block_pattern = r'```[\s\S]*?```'
+        
+        # Also detect indented code blocks (4+ spaces or tab at line start)
+        indented_code_pattern = r'^(?:[ ]{4,}|\t).*(?:\n(?:[ ]{4,}|\t).*)*'
+        
+        # Combine patterns
+        combined_pattern = f'({code_block_pattern}|{indented_code_pattern})'
+        
+        # Split text by code blocks while keeping the blocks
+        parts = re.split(combined_pattern, text, flags=re.MULTILINE)
+        
+        current_text = ""
+        
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+                
+            # Check if this part is a code block
+            if re.match(code_block_pattern, part, re.DOTALL) or re.match(indented_code_pattern, part, re.MULTILINE):
+                # First, add any accumulated text as a segment
+                if current_text.strip():
+                    segments.append(current_text.strip())
+                    current_text = ""
+                
+                # Add the code block as an atomic segment
+                segments.append(part)
+            else:
+                # Accumulate non-code text
+                current_text += part
+        
+        # Add any remaining text
+        if current_text.strip():
+            segments.append(current_text.strip())
+        
+        # If no code blocks found, fall back to paragraph-based segmentation
+        if len(segments) == 1:
+            # Split by double newlines (paragraphs)
+            paragraphs = text.split('\n\n')
+            segments = [p.strip() for p in paragraphs if p.strip()]
+        
+        logger.info(f"Code block isolation: found {len(segments)} segments")
         return segments

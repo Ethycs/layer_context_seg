@@ -258,3 +258,119 @@ def merge_attention_windows(window_graphs: List[Tuple[np.ndarray, int]],
     merged = merged / weights
     
     return merged
+
+
+def build_dual_level_graph(segments: List[Dict], 
+                          token_attention: np.ndarray,
+                          node_attention: np.ndarray,
+                          edge_types: Optional[np.ndarray] = None) -> nx.DiGraph:
+    """
+    Build a graph with dual-level attention information.
+    
+    Args:
+        segments: List of segment dictionaries
+        token_attention: Token-level attention matrix
+        node_attention: Node-level attention matrix
+        edge_types: Optional edge type matrix
+        
+    Returns:
+        NetworkX graph with dual-level properties
+    """
+    from .graph_objects import GraphAwareSegment, DualLevelEdge, EdgeType
+    
+    G = nx.DiGraph()
+    
+    # Add nodes with GAP properties
+    for i, seg in enumerate(segments):
+        gap_segment = GraphAwareSegment(
+            id=seg['id'],
+            content=seg['content'],
+            start_pos=seg.get('start_pos', 0),
+            end_pos=seg.get('end_pos', len(seg['content'])),
+            has_code=seg.get('has_code', False),
+            has_math=seg.get('has_math', False),
+            cohesion_score=seg.get('cohesion', 0.0),
+            node_attention_strength=node_attention[i].mean() if i < node_attention.shape[0] else 0.0
+        )
+        G.add_node(seg['id'], segment=gap_segment)
+    
+    # Add dual-level edges
+    for i in range(len(segments)):
+        for j in range(len(segments)):
+            if i != j and node_attention[i, j] > 0.1:  # Threshold
+                edge_type_val = edge_types[i, j] if edge_types is not None else 0
+                edge_type = EdgeType(int(edge_type_val))
+                
+                dual_edge = DualLevelEdge(
+                    source_id=segments[i]['id'],
+                    target_id=segments[j]['id'],
+                    edge_type=edge_type,
+                    weight=float(node_attention[i, j]),
+                    node_level_attention=float(node_attention[i, j]),
+                    token_level_attention=float(token_attention[i, j]) if i < token_attention.shape[0] and j < token_attention.shape[1] else 0.0
+                )
+                
+                G.add_edge(
+                    segments[i]['id'],
+                    segments[j]['id'],
+                    dual_edge=dual_edge,
+                    weight=dual_edge.combined_strength,
+                    edge_type=edge_type.value
+                )
+    
+    return G
+
+
+def analyze_gap_patterns(graph: nx.DiGraph) -> Dict[str, Any]:
+    """
+    Analyze GAP-specific patterns in the graph.
+    
+    Args:
+        graph: Graph with GAP properties
+        
+    Returns:
+        Analysis results
+    """
+    analysis = {
+        'hub_nodes': [],
+        'cohesive_clusters': [],
+        'cross_level_consistency': 0.0,
+        'attention_flow_patterns': {}
+    }
+    
+    # Find hub nodes (high node attention strength)
+    for node_id, data in graph.nodes(data=True):
+        segment = data.get('segment')
+        if segment and hasattr(segment, 'node_attention_strength'):
+            if segment.node_attention_strength > 0.5:  # Threshold
+                analysis['hub_nodes'].append({
+                    'id': node_id,
+                    'strength': segment.node_attention_strength,
+                    'cohesion': segment.cohesion_score
+                })
+    
+    # Find cohesive clusters
+    cohesive_nodes = [
+        node_id for node_id, data in graph.nodes(data=True)
+        if data.get('segment') and hasattr(data['segment'], 'cohesion_score')
+        and data['segment'].cohesion_score > 0.6
+    ]
+    
+    if cohesive_nodes:
+        subgraph = graph.subgraph(cohesive_nodes)
+        clusters = list(nx.weakly_connected_components(subgraph))
+        analysis['cohesive_clusters'] = [
+            list(cluster) for cluster in clusters if len(cluster) > 1
+        ]
+    
+    # Analyze cross-level consistency
+    edge_consistencies = []
+    for u, v, data in graph.edges(data=True):
+        dual_edge = data.get('dual_edge')
+        if dual_edge and hasattr(dual_edge, 'cross_level_agreement'):
+            edge_consistencies.append(dual_edge.cross_level_agreement)
+    
+    if edge_consistencies:
+        analysis['cross_level_consistency'] = np.mean(edge_consistencies)
+    
+    return analysis

@@ -358,22 +358,8 @@ class TransformerDocumentBuilder:
     
     def _generate_conclusion(self, context: GenerationContext, 
                            nodes: List[Dict]) -> str:
-        """Generate document conclusion"""
-        conclusion = "\n## Conclusion\n\n"
-        
-        # Summarize key points
-        key_points = self._extract_key_points(context.visited_nodes, nodes)
-        
-        if key_points:
-            conclusion += "This document has explored:\n\n"
-            for point in key_points[:5]:
-                conclusion += f"- {point}\n"
-        
-        # Add synthesis
-        conclusion += "\n"
-        conclusion += self._synthesize_final_thoughts(nodes, context)
-        
-        return conclusion
+        """Generate simple document conclusion"""
+        return "\n## Conclusion\n\nDocument processing complete.\n"
     
     # Utility methods
     
@@ -426,32 +412,12 @@ class TransformerDocumentBuilder:
         return any(indicator in content for indicator in code_indicators)
     
     def _format_code_node(self, node: Dict, context: GenerationContext) -> str:
-        """Format a node containing code"""
-        content = node.get('content', '')
-        formatted = []
-        
-        # Add description if available
-        if desc := self._extract_code_description(content):
-            formatted.append(desc)
-        
-        # Format code block
-        if '```' not in content:
-            formatted.append("```python")
-            formatted.append(content)
-            formatted.append("```")
-        else:
-            formatted.append(content)
-        
-        return '\n'.join(formatted)
+        """Format a node containing code - just return content as-is"""
+        return node.get('content', '')
     
     def _format_technical_node(self, node: Dict, context: GenerationContext) -> str:
         """Format technical content"""
-        content = node.get('content', '')
-        
-        # Emphasize technical terms
-        formatted = self._emphasize_technical_terms(content)
-        
-        return formatted
+        return node.get('content', '')
     
     def _format_example_node(self, node: Dict, context: GenerationContext) -> str:
         """Format example content"""
